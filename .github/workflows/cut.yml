@@ -1,0 +1,42 @@
+name: Clip schneiden
+
+on:
+  workflow_dispatch:
+    inputs:
+      vod_url:
+        description: "Link zum VOD"
+        required: true
+      start:
+        description: "Start, z. B. 01:12:30"
+        required: true
+      end:
+        description: "Ende, z. B. 01:13:05"
+        required: true
+      name:
+        description: "Dateiname des Clips (ohne Endung)"
+        required: true
+        default: "clip"
+
+jobs:
+  cut:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools installieren
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          pip install yt-dlp
+
+      - name: Ausschnitt laden
+        run: |
+          yt-dlp --download-sections "*${{ github.event.inputs.start }}-${{ github.event.inputs.end }}" \
+            -f "best[height<=1080]/best" -o raw.mp4 "${{ github.event.inputs.vod_url }}"
+
+      - name: Auf 9:16 bringen
+        run: python scripts/to_vertical.py raw.mp4 "${{ github.event.inputs.name }}.mp4"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.name }}
+          path: ${{ github.event.inputs.name }}.mp4
