@@ -1,0 +1,59 @@
+name: Transkribieren
+
+on:
+  workflow_dispatch:
+    inputs:
+      vod_url:
+        description: "Link zum VOD"
+        required: true
+      streamer:
+        description: "Name des Streamers (muss in streamers.txt stehen)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  transcribe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Streamer pruefen
+        run: |
+          name=$(echo "${{ github.event.inputs.streamer }}" | tr '[:upper:]' '[:lower:]')
+          if ! grep -qix "$name" streamers.txt; then
+            echo "Streamer '$name' steht nicht in streamers.txt. Abbruch."
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Tools installieren
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          pip install yt-dlp faster-whisper numpy
+
+      - name: Audio laden
+        run: |
+          yt-dlp -x --audio-format wav \
+            --postprocessor-args "ffmpeg:-ac 1 -ar 16000" \
+            -o audio.%(ext)s "${{ github.event.inputs.vod_url }}"
+
+      - name: Analysieren
+        run: |
+          mkdir -p data
+          python scripts/analyze.py audio.wav data/latest.json
+          echo "${{ github.event.inputs.streamer }}" > data/streamer.txt
+          echo "${{ github.event.inputs.vod_url }}" > data/vod_url.txt
+
+      - name: Ergebnis ins Repo speichern
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add data
+          git commit -m "Transkript: ${{ github.event.inputs.streamer }}"
+          git push
