@@ -39,9 +39,8 @@ jobs:
 
       - name: Audio laden
         run: |
-          yt-dlp -x --audio-format wav \
-            --postprocessor-args "ffmpeg:-ac 1 -ar 16000" \
-            -o audio.%(ext)s "${{ github.event.inputs.vod_url }}"
+          yt-dlp -x --audio-format wav --postprocessor-args "ffmpeg:-ac 1 -ar 16000" -o "audio.%(ext)s" "${{ github.event.inputs.vod_url }}"
+
 
       - name: Analysieren
         run: |
