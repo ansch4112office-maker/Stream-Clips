@@ -9,6 +9,13 @@ on:
       streamer:
         description: "Name des Streamers (muss in streamers.txt stehen)"
         required: true
+      start:
+        description: "Start im VOD, Format HH:MM:SS, z. B. 01:00:00"
+        required: true
+        default: "00:00:00"
+      end:
+        description: "Ende im VOD, Format HH:MM:SS, z. B. 02:00:00"
+        required: true
 
 permissions:
   contents: write
@@ -16,13 +23,18 @@ permissions:
 jobs:
   transcribe:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 120
+    env:
+      VOD_URL: ${{ github.event.inputs.vod_url }}
+      STREAMER: ${{ github.event.inputs.streamer }}
+      START: ${{ github.event.inputs.start }}
+      END: ${{ github.event.inputs.end }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Streamer pruefen
         run: |
-          name=$(echo "${{ github.event.inputs.streamer }}" | tr '[:upper:]' '[:lower:]')
+          name=$(echo "$STREAMER" | tr '[:upper:]' '[:lower:]')
           if ! grep -qix "$name" streamers.txt; then
             echo "Streamer '$name' steht nicht in streamers.txt. Abbruch."
             exit 1
@@ -39,20 +51,34 @@ jobs:
 
       - name: Audio laden
         run: |
-          yt-dlp -x --audio-format wav --postprocessor-args "ffmpeg:-ac 1 -ar 16000" -o "audio.%(ext)s" "${{ github.event.inputs.vod_url }}"
-
+          yt-dlp --download-sections "*$START-$END" -x --audio-format wav --postprocessor-args "ffmpeg:-ac 1 -ar 16000" -o "audio.%(ext)s" "$VOD_URL"
 
       - name: Analysieren
         run: |
+          sed -i 's/WhisperModel("small"/WhisperModel("base"/' scripts/analyze.py
           mkdir -p data
           python scripts/analyze.py audio.wav data/latest.json
-          echo "${{ github.event.inputs.streamer }}" > data/streamer.txt
-          echo "${{ github.event.inputs.vod_url }}" > data/vod_url.txt
+          IFS=: read -r h m s <<< "$START"
+          export OFFSET=$((10#$h*3600 + 10#$m*60 + 10#$s))
+          python - <<'EOF'
+          import json, os
+          off = int(os.environ["OFFSET"])
+          with open("data/latest.json", encoding="utf-8") as f:
+              d = json.load(f)
+          for x in d["transcript"] + d["loud_moments"]:
+              x["start"] += off
+              x["end"] += off
+          d["offset_sec"] = off
+          with open("data/latest.json", "w", encoding="utf-8") as f:
+              json.dump(d, f, ensure_ascii=False, indent=1)
+          EOF
+          echo "$STREAMER" > data/streamer.txt
+          echo "$VOD_URL" > data/vod_url.txt
 
       - name: Ergebnis ins Repo speichern
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add data
-          git commit -m "Transkript: ${{ github.event.inputs.streamer }}"
+          git commit -m "Transkript: $STREAMER ($START bis $END)"
           git push
