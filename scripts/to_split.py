@@ -82,7 +82,7 @@ except (OSError, json.JSONDecodeError):
     fallback("facecam.json fehlt oder ist kaputt")
 
 if not face.get("found"):
-    fallback("keine Facecam erkannt")
+    fallback("keine Facecam erkannt (" + str(face.get("reason", "ohne Angabe")) + ")")
 
 sw, sh = probe(src)
 fx0, fy0 = even(face["box"][0] * sw), even(face["box"][1] * sh)
