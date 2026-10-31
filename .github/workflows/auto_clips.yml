@@ -1,0 +1,172 @@
+name: Auto-Clips
+
+# Ein Klick: VOD rein, fertige Shorts raus.
+# Ablauf: Transkript -> Gemini sucht die besten Clips -> jeder Clip wird geschnitten,
+# die Facecam automatisch gefunden und oben/unten gestapelt -> alles in einem Download.
+
+on:
+  workflow_dispatch:
+    inputs:
+      vod_url:
+        description: "Link zum VOD"
+        required: true
+      streamer:
+        description: "Name des Streamers (muss in streamers.txt stehen)"
+        required: true
+      start:
+        description: "Optional: Start im VOD, HH:MM:SS (Standard: Anfang)"
+        required: false
+        default: "00:00:00"
+      end:
+        description: "Optional: Ende im VOD, HH:MM:SS (Standard: bis zum Ende)"
+        required: false
+        default: "inf"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Transkript und Clip-Auswahl
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    outputs:
+      clips: ${{ steps.pick.outputs.clips }}
+    env:
+      VOD_URL: ${{ github.event.inputs.vod_url }}
+      STREAMER: ${{ github.event.inputs.streamer }}
+      START: ${{ github.event.inputs.start }}
+      END: ${{ github.event.inputs.end }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Streamer pruefen
+        run: |
+          name=$(echo "$STREAMER" | tr '[:upper:]' '[:lower:]')
+          if ! grep -qix "$name" streamers.txt; then
+            echo "Streamer '$name' steht nicht in streamers.txt. Abbruch."
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Tools installieren
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          pip install yt-dlp faster-whisper numpy
+
+      - name: Audio laden
+        run: |
+          yt-dlp --download-sections "*$START-$END" -x --audio-format wav --postprocessor-args "ffmpeg:-ac 1 -ar 16000" -o "audio.%(ext)s" "$VOD_URL"
+
+      - name: Transkribieren und laute Momente finden
+        run: |
+          sed -i 's/WhisperModel("small"/WhisperModel("base"/' scripts/analyze.py
+          mkdir -p data
+          python scripts/analyze.py audio.wav data/latest.json
+          IFS=: read -r h m s <<< "$START"
+          export OFFSET=$((10#$h*3600 + 10#$m*60 + 10#$s))
+          python - <<'EOF'
+          import json, os
+          off = int(os.environ["OFFSET"])
+          with open("data/latest.json", encoding="utf-8") as f:
+              d = json.load(f)
+          for x in d["transcript"] + d["loud_moments"]:
+              x["start"] += off
+              x["end"] += off
+          d["offset_sec"] = off
+          with open("data/latest.json", "w", encoding="utf-8") as f:
+              json.dump(d, f, ensure_ascii=False, indent=1)
+          EOF
+
+      - name: Beste Clips mit Gemini aussuchen
+        id: pick
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+        run: |
+          python scripts/pick_clips.py data/latest.json clips.json
+          echo "clips=$(jq -c '[.clips[] | {name, start, end}]' clips.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Auswahl und Transkript aufheben (zum Nachschauen)
+        uses: actions/upload-artifact@v4
+        with:
+          name: auswahl
+          path: |
+            clips.json
+            data/latest.json
+          retention-days: 7
+
+  cut:
+    name: Clip ${{ matrix.clip.name }}
+    needs: analyze
+    if: needs.analyze.outputs.clips != '' && needs.analyze.outputs.clips != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        clip: ${{ fromJson(needs.analyze.outputs.clips) }}
+    env:
+      VOD_URL: ${{ github.event.inputs.vod_url }}
+      CLIP_NAME: ${{ matrix.clip.name }}
+      CLIP_START: ${{ matrix.clip.start }}
+      CLIP_END: ${{ matrix.clip.end }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Tools installieren
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          pip install yt-dlp
+
+      - name: Ausschnitt laden
+        run: |
+          yt-dlp --download-sections "*$CLIP_START-$CLIP_END" \
+            -f "best[height<=1080]/best" -o raw.mp4 "$VOD_URL"
+
+      - name: Facecam finden
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+        run: python scripts/detect_facecam.py raw.mp4 facecam.json "debug_$CLIP_NAME.jpg"
+
+      - name: Layout bauen (oben Facecam, unten Gameplay)
+        run: |
+          mkdir -p fertig
+          python scripts/to_split.py raw.mp4 "fertig/$CLIP_NAME.mp4" facecam.json
+
+      - name: Fertigen Clip hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: clip-${{ matrix.clip.name }}
+          path: fertig/${{ matrix.clip.name }}.mp4
+          retention-days: 7
+
+      - name: Kontrollbild der Facecam-Erkennung hochladen
+        if: hashFiles(format('debug_{0}.jpg', matrix.clip.name)) != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: kontrolle-${{ matrix.clip.name }}
+          path: debug_${{ matrix.clip.name }}.jpg
+          retention-days: 7
+
+  sammeln:
+    name: Alle Clips in einen Download
+    needs: cut
+    if: ${{ !cancelled() && needs.cut.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact/merge@v4
+        with:
+          name: fertige-clips
+          pattern: clip-*
+          delete-merged: true
+          retention-days: 7
