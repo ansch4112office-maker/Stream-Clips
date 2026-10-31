@@ -32,10 +32,12 @@ rms = [
 rms_arr = np.array(rms)
 median = float(np.median(rms_arr)) or 1.0
 
+# Schwelle 1.6x (vorher 2.0x) und bis zu 150 Fenster (vorher 40), damit die Lautstaerke
+# bei der Clip-Auswahl ueber das ganze VOD hinweg mitzaehlt
 loud = [
     {"start": i * 5, "end": i * 5 + 5, "factor": round(v / median, 2)}
     for i, v in enumerate(rms)
-    if v / median >= 2.0
+    if v / median >= 1.6
 ]
 loud.sort(key=lambda x: x["factor"], reverse=True)
 
@@ -44,7 +46,7 @@ with open(out_path, "w", encoding="utf-8") as f:
         {
             "language": info.language,
             "duration_sec": round(len(data) / rate),
-            "loud_moments": loud[:40],
+            "loud_moments": loud[:150],
             "transcript": transcript,
         },
         f,
