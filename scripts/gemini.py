@@ -29,8 +29,10 @@ def image_part(path):
     return {"inline_data": {"mime_type": "image/jpeg", "data": data}}
 
 
-def ask(parts, schema, temperature=0.3):
-    """Schickt parts (Text und Bilder) an Gemini und gibt die Antwort als JSON-Objekt zurueck."""
+def ask(parts, schema, temperature=0.3, attempts=4):
+    """Schickt parts (Text und Bilder) an Gemini und gibt die Antwort als JSON-Objekt zurueck.
+
+    attempts = Versuche pro Modell (bei Limit oder Ueberlastung wird kurz gewartet)."""
     key = os.environ["GEMINI_API_KEY"]
 
     models = []
@@ -51,7 +53,7 @@ def ask(parts, schema, temperature=0.3):
 
     last_error = "unbekannt"
     for model in models:
-        for attempt in range(4):
+        for attempt in range(attempts):
             req = urllib.request.Request(
                 API.format(model=model),
                 data=body,
