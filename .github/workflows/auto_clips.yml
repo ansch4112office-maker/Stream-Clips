@@ -133,6 +133,7 @@ jobs:
             -f "best[height<=1080]/best" -o raw.mp4 "$VOD_URL"
 
       - name: Facecam finden
+        continue-on-error: true  # klappt die Erkennung nicht, wird der Clip im normalen 9:16-Layout gebaut
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
@@ -141,6 +142,13 @@ jobs:
       - name: Layout bauen (oben Facecam, unten Gameplay)
         run: |
           mkdir -p fertig
+          {
+            echo "**$CLIP_NAME**"
+            echo '```'
+            cat facecam.json 2>/dev/null || echo "keine facecam.json, Erkennung ist abgestuerzt"
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
           python scripts/to_split.py raw.mp4 "fertig/$CLIP_NAME.mp4" facecam.json
 
       - name: Fertigen Clip hochladen
