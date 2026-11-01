@@ -10,8 +10,10 @@ Die Audiodatei wird in Stuecken (Standard: 15 Minuten) verarbeitet statt in eine
 Einstellungen ueber Umgebungsvariablen (alle optional):
   WHISPER_MODEL    Modellgroesse, Standard "base"
   CHUNK_SEC        Laenge eines Stuecks in Sekunden, Standard 900 (wird auf ein Vielfaches von 5 gerundet)
-  WHISPER_THREADS  Rechenkerne fuer Whisper, Standard: alle Kerne minus einer (mindestens 1),
-                   damit der GitHub-Runner selbst genug Luft hat
+  WHISPER_THREADS  Rechenkerne fuer Whisper, Standard: alle Kerne
+  TIME_BUDGET_SEC  Zeitbudget in Sekunden (0 = unbegrenzt). Ist es aufgebraucht, wird nach dem
+                   aktuellen Stueck sauber aufgehoert und nur der bis dahin analysierte Teil
+                   gespeichert, statt dass GitHub den Lauf am Zeitlimit abschiesst
 """
 import json
 import os
@@ -28,7 +30,8 @@ audio_path, out_path = sys.argv[1], sys.argv[2]
 MODEL = os.environ.get("WHISPER_MODEL", "base")
 WIN_SEC = 5  # Fensterbreite fuer die Lautstaerke
 CHUNK_SEC = max(WIN_SEC, int(os.environ.get("CHUNK_SEC", "900")) // WIN_SEC * WIN_SEC)
-THREADS = int(os.environ.get("WHISPER_THREADS") or max(1, (os.cpu_count() or 2) - 1))
+THREADS = int(os.environ.get("WHISPER_THREADS") or os.cpu_count() or 2)
+BUDGET_SEC = int(os.environ.get("TIME_BUDGET_SEC") or 0)
 LOUD_FACTOR = 1.6  # ab dem Wievielfachen der ueblichen Lautstaerke ein Fenster als laut gilt
 MAX_LOUD = 150  # so viele laute Fenster werden hoechstens gespeichert
 
@@ -67,6 +70,7 @@ rms = []  # Lautstaerke pro 5-Sekunden-Fenster ueber die ganze Datei
 language = None  # wird beim ersten sicheren Treffer festgelegt und danach beibehalten
 
 win = rate * WIN_SEC
+done_frames = 0  # so viel Audio wurde tatsaechlich analysiert
 for idx in range(n_chunks):
     pcm = np.frombuffer(w.readframes(chunk_frames), dtype=np.int16)
     if pcm.size == 0:
@@ -93,12 +97,24 @@ for idx in range(n_chunks):
     if language is None and info.language_probability >= 0.7:
         language = info.language
 
+    done_frames += pcm.size
     del pcm, samples
     done_min = min((idx + 1) * CHUNK_SEC, total / rate) / 60
     log(
         f"[{idx + 1}/{n_chunks}] bis Minute {done_min:.0f} fertig | {len(transcript)} Segmente | "
         f"RAM-Spitze {peak_ram_mb():.0f} MB | {time.time() - t0:.0f} s"
     )
+
+    # Zeitbudget: reicht die Zeit nicht mehr fuer ein weiteres Stueck, hier sauber aufhoeren
+    if BUDGET_SEC and idx + 1 < n_chunks:
+        per_chunk = (time.time() - t0) / (idx + 1)
+        if time.time() - t0 + per_chunk > BUDGET_SEC:
+            log(
+                f"ZEITBUDGET aufgebraucht ({BUDGET_SEC // 60} Minuten): nur die ersten "
+                f"{done_frames / rate / 60:.0f} von {total / rate / 60:.0f} Minuten wurden analysiert. "
+                f"Den Rest bei Bedarf separat mit start/end laufen lassen."
+            )
+            break
 
 w.close()
 
@@ -119,7 +135,7 @@ with open(out_path, "w", encoding="utf-8") as f:
     json.dump(
         {
             "language": language or "unbekannt",
-            "duration_sec": round(total / rate),
+            "duration_sec": round(done_frames / rate),
             "loud_moments": loud[:MAX_LOUD],
             "transcript": transcript,
         },
