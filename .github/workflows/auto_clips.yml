@@ -60,11 +60,29 @@ jobs:
       - name: Audio laden
         run: |
           yt-dlp --download-sections "*$START-$END" -x --audio-format wav --postprocessor-args "ffmpeg:-ac 1 -ar 16000" -o "audio.%(ext)s" "$VOD_URL"
+          ls -lh audio.wav
 
       - name: Transkribieren und laute Momente finden
+        env:
+          PYTHONUNBUFFERED: "1"
+          WHISPER_MODEL: base
         run: |
-          sed -i 's/WhisperModel("small"/WhisperModel("base"/' scripts/analyze.py
           mkdir -p data
+
+          # Waechter im Hintergrund: schreibt alle 20 s RAM, Last und freien Platz ins Log.
+          # Bricht der Runner ab, sieht man hier, wie es ihm kurz davor ging.
+          monitor() {
+            while true; do
+              echo "[monitor] $(date +%T) RAM $(free -m | awk '/Mem:/ {print $3 "/" $2 " MB"}'), Last $(cut -d' ' -f1 /proc/loadavg), Platte frei $(df -h . | awk 'NR==2 {print $4}')"
+              sleep 20
+            done
+          }
+          monitor &
+          MONITOR_PID=$!
+          trap 'kill $MONITOR_PID 2>/dev/null || true' EXIT
+          echo "Kerne: $(nproc)"
+          free -m
+
           python scripts/analyze.py audio.wav data/latest.json
           IFS=: read -r h m s <<< "$START"
           export OFFSET=$((10#$h*3600 + 10#$m*60 + 10#$s))
@@ -80,6 +98,13 @@ jobs:
           with open("data/latest.json", "w", encoding="utf-8") as f:
               json.dump(d, f, ensure_ascii=False, indent=1)
           EOF
+
+      - name: Diagnose (nur bei Fehler oder Abbruch)
+        if: failure() || cancelled()
+        run: |
+          free -m
+          df -h .
+          sudo dmesg 2>/dev/null | grep -iE "out of memory|oom|killed process" | tail -n 10 || true
 
       - name: Beste Clips mit Gemini aussuchen
         id: pick
