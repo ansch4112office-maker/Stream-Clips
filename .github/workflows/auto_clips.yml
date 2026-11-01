@@ -29,7 +29,7 @@ jobs:
   analyze:
     name: Transkript und Clip-Auswahl
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 360  # mehr erlaubt GitHub fuer einen Job nicht
     outputs:
       clips: ${{ steps.pick.outputs.clips }}
     env:
@@ -38,6 +38,9 @@ jobs:
       START: ${{ github.event.inputs.start }}
       END: ${{ github.event.inputs.end }}
     steps:
+      - name: Startzeit merken
+        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
 
       - name: Streamer pruefen
@@ -82,6 +85,15 @@ jobs:
           trap 'kill $MONITOR_PID 2>/dev/null || true' EXIT
           echo "Kerne: $(nproc)"
           free -m
+
+          # Zeitbudget: der Job darf 360 Minuten laufen, davon ist schon ein Teil fuer Setup und
+          # Download weg. 20 Minuten bleiben als Reserve fuer Clip-Auswahl und Upload.
+          # Reicht die Zeit nicht fuer das ganze VOD, hoert analyze.py sauber auf und
+          # analysiert nur den Teil, der noch reinpasst.
+          LEFT=$(( 360*60 - ($(date +%s) - JOB_START) - 20*60 ))
+          if [ "$LEFT" -lt 300 ]; then LEFT=300; fi
+          export TIME_BUDGET_SEC=$LEFT
+          echo "Zeitbudget fuers Transkribieren: $((LEFT / 60)) Minuten"
 
           python scripts/analyze.py audio.wav data/latest.json
           IFS=: read -r h m s <<< "$START"
