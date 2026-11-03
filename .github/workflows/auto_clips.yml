@@ -125,7 +125,7 @@ jobs:
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
         run: |
           python scripts/pick_clips.py data/latest.json clips.json
-          echo "clips=$(jq -c '[.clips[] | {name, start, end}]' clips.json)" >> "$GITHUB_OUTPUT"
+          echo "clips=$(jq -c '[.clips[] | {name, start, end, lang}]' clips.json)" >> "$GITHUB_OUTPUT"
 
       - name: Auswahl und Transkript aufheben (zum Nachschauen)
         uses: actions/upload-artifact@v4
@@ -152,6 +152,7 @@ jobs:
       CLIP_NAME: ${{ matrix.clip.name }}
       CLIP_START: ${{ matrix.clip.start }}
       CLIP_END: ${{ matrix.clip.end }}
+      CLIP_LANG: ${{ matrix.clip.lang }}
     steps:
       - uses: actions/checkout@v4
 
@@ -162,12 +163,18 @@ jobs:
       - name: Tools installieren
         run: |
           sudo apt-get update && sudo apt-get install -y ffmpeg
-          pip install yt-dlp
+          sudo apt-get install -y fonts-montserrat || echo "Schrift Montserrat nicht verfuegbar, Untertitel nutzen eine Ersatzschrift"
+          pip install yt-dlp faster-whisper
 
       - name: Ausschnitt laden
+        # force-keyframes-at-cuts: der Clip beginnt auf die Sekunde genau, nicht am Keyframe davor
         run: |
-          yt-dlp --download-sections "*$CLIP_START-$CLIP_END" \
+          yt-dlp --download-sections "*$CLIP_START-$CLIP_END" --force-keyframes-at-cuts \
             -f "best[height<=1080]/best" -o raw.mp4 "$VOD_URL"
+
+      - name: Untertitel erzeugen
+        continue-on-error: true  # klappt das nicht, wird der Clip ohne Untertitel gebaut
+        run: python scripts/make_subs.py raw.mp4 subs.ass "$CLIP_LANG"
 
       - name: Facecam finden
         continue-on-error: true  # klappt die Erkennung nicht, wird der Clip im normalen 9:16-Layout gebaut
@@ -186,7 +193,10 @@ jobs:
             echo
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          python scripts/to_split.py raw.mp4 "fertig/$CLIP_NAME.mp4" facecam.json
+          # ohne subs.ass (Untertitel-Schritt fehlgeschlagen) wird der Clip ohne Untertitel gebaut
+          SUBS=""
+          if [ -s subs.ass ]; then SUBS="subs.ass"; else echo "Keine Untertitel fuer diesen Clip"; fi
+          python scripts/to_split.py raw.mp4 "fertig/$CLIP_NAME.mp4" facecam.json $SUBS
 
       - name: Fertigen Clip hochladen
         uses: actions/upload-artifact@v4
