@@ -23,7 +23,7 @@ permissions:
 jobs:
   transcribe:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 300
     env:
       VOD_URL: ${{ github.event.inputs.vod_url }}
       STREAMER: ${{ github.event.inputs.streamer }}
@@ -51,11 +51,12 @@ jobs:
 
       - name: Audio laden
         run: |
-          yt-dlp --download-sections "*$START-$END" -x --audio-format wav --postprocessor-args "ffmpeg:-ac 1 -ar 16000" -o "audio.%(ext)s" "$VOD_URL"
+          yt-dlp --download-sections "*$START-$END" --force-keyframes-at-cuts -x --audio-format wav --postprocessor-args "ffmpeg:-ac 1 -ar 16000" -o "audio.%(ext)s" "$VOD_URL"
 
       - name: Analysieren
+        env:
+          WHISPER_MODEL: small
         run: |
-          sed -i 's/WhisperModel("small"/WhisperModel("base"/' scripts/analyze.py
           mkdir -p data
           python scripts/analyze.py audio.wav data/latest.json
           IFS=: read -r h m s <<< "$START"
@@ -65,12 +66,12 @@ jobs:
           off = int(os.environ["OFFSET"])
           with open("data/latest.json", encoding="utf-8") as f:
               d = json.load(f)
-          for x in d["transcript"] + d["loud_moments"]:
+          for x in d["transcript"] + d["words"] + d["loud_moments"]:
               x["start"] += off
               x["end"] += off
           d["offset_sec"] = off
           with open("data/latest.json", "w", encoding="utf-8") as f:
-              json.dump(d, f, ensure_ascii=False, indent=1)
+              json.dump(d, f, ensure_ascii=False, separators=(",", ":"))
           EOF
           echo "$STREAMER" > data/streamer.txt
           echo "$VOD_URL" > data/vod_url.txt
