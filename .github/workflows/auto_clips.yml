@@ -1,8 +1,11 @@
 name: Auto-Clips
 
 # Ein Klick: VOD rein, fertige Shorts raus.
-# Ablauf: Transkript -> Gemini sucht die besten Clips -> jeder Clip wird geschnitten,
-# die Facecam automatisch gefunden und oben/unten gestapelt -> alles in einem Download.
+# Ablauf: Transkript (Whisper small, mit Wortzeiten) -> Gemini waehlt Kandidaten ->
+# Facecam wird einmal pro Streamer gefunden und gemerkt ->
+# jeder Kandidat wird geschnitten, von Gemini als Video geprueft (behalten oder aussortieren,
+# Titel und Laenge korrigieren), bekommt Untertitel und das Layout oben Facecam / unten Gameplay ->
+# alles in einem Download. Gibt es keine guten Clips, steht das in der Zusammenfassung des Laufs.
 
 on:
   workflow_dispatch:
@@ -21,15 +24,21 @@ on:
         description: "Optional: Ende im VOD, HH:MM:SS (Standard: bis zum Ende)"
         required: false
         default: "inf"
+      facecam_neu:
+        description: "Facecam neu erkennen (sonst wird die gemerkte Position des Streamers benutzt)"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   analyze:
     name: Transkript und Clip-Auswahl
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # mehr erlaubt GitHub fuer einen Job nicht
+    timeout-minutes: 300
     outputs:
       clips: ${{ steps.pick.outputs.clips }}
     env:
@@ -38,9 +47,6 @@ jobs:
       START: ${{ github.event.inputs.start }}
       END: ${{ github.event.inputs.end }}
     steps:
-      - name: Startzeit merken
-        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
-
       - uses: actions/checkout@v4
 
       - name: Streamer pruefen
@@ -62,13 +68,15 @@ jobs:
 
       - name: Audio laden
         run: |
-          yt-dlp --download-sections "*$START-$END" -x --audio-format wav --postprocessor-args "ffmpeg:-ac 1 -ar 16000" -o "audio.%(ext)s" "$VOD_URL"
+          # --force-keyframes-at-cuts: der Ausschnitt beginnt genau bei START und nicht ein paar
+          # Sekunden frueher, sonst stimmen Transkript-Zeiten und VOD-Zeiten nicht ueberein
+          yt-dlp --download-sections "*$START-$END" --force-keyframes-at-cuts -x --audio-format wav --postprocessor-args "ffmpeg:-ac 1 -ar 16000" -o "audio.%(ext)s" "$VOD_URL"
           ls -lh audio.wav
 
       - name: Transkribieren und laute Momente finden
         env:
           PYTHONUNBUFFERED: "1"
-          WHISPER_MODEL: base
+          WHISPER_MODEL: small
         run: |
           mkdir -p data
 
@@ -86,15 +94,6 @@ jobs:
           echo "Kerne: $(nproc)"
           free -m
 
-          # Zeitbudget: der Job darf 360 Minuten laufen, davon ist schon ein Teil fuer Setup und
-          # Download weg. 20 Minuten bleiben als Reserve fuer Clip-Auswahl und Upload.
-          # Reicht die Zeit nicht fuer das ganze VOD, hoert analyze.py sauber auf und
-          # analysiert nur den Teil, der noch reinpasst.
-          LEFT=$(( 360*60 - ($(date +%s) - JOB_START) - 20*60 ))
-          if [ "$LEFT" -lt 300 ]; then LEFT=300; fi
-          export TIME_BUDGET_SEC=$LEFT
-          echo "Zeitbudget fuers Transkribieren: $((LEFT / 60)) Minuten"
-
           python scripts/analyze.py audio.wav data/latest.json
           IFS=: read -r h m s <<< "$START"
           export OFFSET=$((10#$h*3600 + 10#$m*60 + 10#$s))
@@ -103,12 +102,12 @@ jobs:
           off = int(os.environ["OFFSET"])
           with open("data/latest.json", encoding="utf-8") as f:
               d = json.load(f)
-          for x in d["transcript"] + d["loud_moments"]:
+          for x in d["transcript"] + d["words"] + d["loud_moments"]:
               x["start"] += off
               x["end"] += off
           d["offset_sec"] = off
           with open("data/latest.json", "w", encoding="utf-8") as f:
-              json.dump(d, f, ensure_ascii=False, indent=1)
+              json.dump(d, f, ensure_ascii=False, separators=(",", ":"))
           EOF
 
       - name: Diagnose (nur bei Fehler oder Abbruch)
@@ -118,16 +117,16 @@ jobs:
           df -h .
           sudo dmesg 2>/dev/null | grep -iE "out of memory|oom|killed process" | tail -n 10 || true
 
-      - name: Beste Clips mit Gemini aussuchen
+      - name: Kandidaten mit Gemini aussuchen
         id: pick
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
         run: |
           python scripts/pick_clips.py data/latest.json clips.json
-          echo "clips=$(jq -c '[.clips[] | {name, start, end, lang}]' clips.json)" >> "$GITHUB_OUTPUT"
+          echo "clips=$(jq -c '[.clips[] | {name, title, kind, start_sec, end_sec, seg_start, seg_end, seg_start_sec}]' clips.json)" >> "$GITHUB_OUTPUT"
 
-      - name: Auswahl und Transkript aufheben (zum Nachschauen)
+      - name: Auswahl und Transkript aufheben (zum Nachschauen und fuer die naechsten Jobs)
         uses: actions/upload-artifact@v4
         with:
           name: auswahl
@@ -136,10 +135,118 @@ jobs:
             data/latest.json
           retention-days: 7
 
+  facecam:
+    name: Facecam finden
+    needs: analyze
+    if: ${{ needs.analyze.outputs.clips != '' && needs.analyze.outputs.clips != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VOD_URL: ${{ github.event.inputs.vod_url }}
+      STREAMER: ${{ github.event.inputs.streamer }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Streamer-Kennung
+        run: echo "SLUG=$(echo "$STREAMER" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_')" >> "$GITHUB_ENV"
+
+      # Die Position der Facecam bleibt pro Streamer meist gleich. Sie wird deshalb einmal erkannt
+      # und im Cache gemerkt. Mit "facecam_neu" wird der Cache ignoriert.
+      - name: Gemerkte Facecam laden
+        if: ${{ github.event.inputs.facecam_neu != 'true' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: facecam_cache
+          key: facecam-${{ env.SLUG }}-${{ github.run_id }}
+          restore-keys: |
+            facecam-${{ env.SLUG }}-
+
+      - name: Gemerkte Facecam pruefen
+        id: have
+        run: |
+          mkdir -p facecam_cache out
+          if [ -s facecam_cache/facecam.json ]; then
+            echo "cached=true" >> "$GITHUB_OUTPUT"
+            echo "Gemerkte Facecam gefunden:"; cat facecam_cache/facecam.json; echo
+          else
+            echo "cached=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Tools installieren
+        if: steps.have.outputs.cached == 'false'
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          pip install yt-dlp
+
+      - uses: actions/download-artifact@v4
+        if: steps.have.outputs.cached == 'false'
+        with:
+          name: auswahl
+          path: auswahl
+
+      - name: Facecam erkennen
+        id: detect
+        if: steps.have.outputs.cached == 'false'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+        run: |
+          # bis zu vier kurze Ausschnitte (je 4 s) aus verschiedenen Kandidaten laden
+          n=$(jq '.clips | length' auswahl/clips.json)
+          [ "$n" -gt 4 ] && n=4
+          for i in $(seq 0 $((n - 1))); do
+            s=$(jq -r ".clips[$i].start_sec" auswahl/clips.json)
+            a=$(printf '%02d:%02d:%02d' $(((s + 3) / 3600)) $(((s + 3) % 3600 / 60)) $(((s + 3) % 60)))
+            b=$(printf '%02d:%02d:%02d' $(((s + 7) / 3600)) $(((s + 7) % 3600 / 60)) $(((s + 7) % 60)))
+            yt-dlp --download-sections "*$a-$b" --force-keyframes-at-cuts \
+              -f "best[height<=1080]/best" -o "snip_$i.mp4" "$VOD_URL" || echo "Ausschnitt $i nicht geladen"
+          done
+          ls -lh snip_*.mp4 || true
+          python scripts/detect_facecam.py facecam_new.json debug_facecam.jpg snip_*.mp4
+          if [ "$(jq -r .found facecam_new.json)" = "true" ]; then
+            cp facecam_new.json facecam_cache/facecam.json
+            echo "save=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Facecam merken (nur wenn sicher erkannt)
+        if: steps.detect.outputs.save == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: facecam_cache
+          key: facecam-${{ env.SLUG }}-${{ github.run_id }}
+
+      - name: Ergebnis fuer die Clip-Jobs bereitstellen
+        run: |
+          if [ -s facecam_cache/facecam.json ]; then
+            cp facecam_cache/facecam.json out/facecam.json
+          elif [ -s facecam_new.json ]; then
+            cp facecam_new.json out/facecam.json
+          else
+            echo '{"found": false, "reason": "Erkennung nicht gelaufen"}' > out/facecam.json
+          fi
+          cp debug_facecam.jpg out/ 2>/dev/null || true
+          {
+            echo "**Facecam ($SLUG)**"
+            echo '```'
+            cat out/facecam.json
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: facecam
+          path: out/
+          retention-days: 7
+
   cut:
     name: Clip ${{ matrix.clip.name }}
-    needs: analyze
-    if: needs.analyze.outputs.clips != '' && needs.analyze.outputs.clips != '[]'
+    needs: [analyze, facecam]
+    if: ${{ !cancelled() && needs.analyze.result == 'success' && needs.analyze.outputs.clips != '' && needs.analyze.outputs.clips != '[]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -150,9 +257,6 @@ jobs:
     env:
       VOD_URL: ${{ github.event.inputs.vod_url }}
       CLIP_NAME: ${{ matrix.clip.name }}
-      CLIP_START: ${{ matrix.clip.start }}
-      CLIP_END: ${{ matrix.clip.end }}
-      CLIP_LANG: ${{ matrix.clip.lang }}
     steps:
       - uses: actions/checkout@v4
 
@@ -162,64 +266,88 @@ jobs:
 
       - name: Tools installieren
         run: |
-          sudo apt-get update && sudo apt-get install -y ffmpeg
-          sudo apt-get install -y fonts-montserrat || echo "Schrift Montserrat nicht verfuegbar, Untertitel nutzen eine Ersatzschrift"
-          pip install yt-dlp faster-whisper
+          sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+          pip install yt-dlp
 
-      - name: Ausschnitt laden
-        # force-keyframes-at-cuts: der Clip beginnt auf die Sekunde genau, nicht am Keyframe davor
+      - uses: actions/download-artifact@v4
+        with:
+          name: auswahl
+          path: auswahl
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true  # ohne Facecam-Ergebnis wird das normale 9:16-Layout gebaut
+        with:
+          name: facecam
+          path: face
+
+      - name: Ausschnitt laden (Kandidat mit Puffer)
         run: |
-          yt-dlp --download-sections "*$CLIP_START-$CLIP_END" --force-keyframes-at-cuts \
+          yt-dlp --download-sections "*${{ matrix.clip.seg_start }}-${{ matrix.clip.seg_end }}" --force-keyframes-at-cuts \
             -f "best[height<=1080]/best" -o raw.mp4 "$VOD_URL"
 
-      - name: Untertitel erzeugen
-        continue-on-error: true  # klappt das nicht, wird der Clip ohne Untertitel gebaut
-        run: python scripts/make_subs.py raw.mp4 subs.ass "$CLIP_LANG"
-
-      - name: Facecam finden
-        continue-on-error: true  # klappt die Erkennung nicht, wird der Clip im normalen 9:16-Layout gebaut
+      - name: Von Gemini pruefen lassen und schneiden
+        id: review
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
-        run: python scripts/detect_facecam.py raw.mp4 facecam.json "debug_$CLIP_NAME.jpg"
+          SEG_START_SEC: ${{ matrix.clip.seg_start_sec }}
+          CLIP_START_SEC: ${{ matrix.clip.start_sec }}
+          CLIP_END_SEC: ${{ matrix.clip.end_sec }}
+          CLIP_TITLE: ${{ matrix.clip.title }}
+          CLIP_KIND: ${{ matrix.clip.kind }}
+        run: |
+          python scripts/review_clips.py raw.mp4 auswahl/data/latest.json review.json trimmed.mp4
+          echo "keep=$(jq -r .keep review.json)" >> "$GITHUB_OUTPUT"
+          jq -r --arg n "$CLIP_NAME" '"**" + $n + "** (" + .title + "): " + (if .keep then "behalten, " + (.laenge|tostring) + " s" else "aussortiert" end) + " | Score " + (.score|tostring) + (if .geprueft then "" else " | NICHT geprueft, Gemini nicht erreichbar" end) + " | " + .reason + "\n"' review.json >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Layout bauen (oben Facecam, unten Gameplay)
+      - name: Untertitel bauen
+        if: steps.review.outputs.keep == 'true'
+        run: python scripts/subtitles.py auswahl/data/latest.json review.json subs.ass
+
+      - name: Layout bauen (oben Facecam, unten Gameplay, mit Untertiteln)
+        if: steps.review.outputs.keep == 'true'
         run: |
           mkdir -p fertig
-          {
-            echo "**$CLIP_NAME**"
-            echo '```'
-            cat facecam.json 2>/dev/null || echo "keine facecam.json, Erkennung ist abgestuerzt"
-            echo
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-          # ohne subs.ass (Untertitel-Schritt fehlgeschlagen) wird der Clip ohne Untertitel gebaut
-          SUBS=""
-          if [ -s subs.ass ]; then SUBS="subs.ass"; else echo "Keine Untertitel fuer diesen Clip"; fi
-          python scripts/to_split.py raw.mp4 "fertig/$CLIP_NAME.mp4" facecam.json $SUBS
+          python scripts/to_split.py trimmed.mp4 "fertig/$CLIP_NAME.mp4" face/facecam.json subs.ass
+          jq -r .title review.json > "fertig/$CLIP_NAME.txt"
 
       - name: Fertigen Clip hochladen
+        if: steps.review.outputs.keep == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: clip-${{ matrix.clip.name }}
-          path: fertig/${{ matrix.clip.name }}.mp4
-          retention-days: 7
-
-      - name: Kontrollbild der Facecam-Erkennung hochladen
-        if: hashFiles(format('debug_{0}.jpg', matrix.clip.name)) != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: kontrolle-${{ matrix.clip.name }}
-          path: debug_${{ matrix.clip.name }}.jpg
+          path: |
+            fertig/${{ matrix.clip.name }}.mp4
+            fertig/${{ matrix.clip.name }}.txt
           retention-days: 7
 
   sammeln:
     name: Alle Clips in einen Download
-    needs: cut
-    if: ${{ !cancelled() && needs.cut.result != 'skipped' }}
+    needs: [analyze, cut]
+    if: ${{ !cancelled() && needs.analyze.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/upload-artifact/merge@v4
+      - name: Fertige Clips zaehlen
+        id: count
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" --paginate --jq '.artifacts[].name' | grep -c '^clip-' || true)
+          echo "n=$n" >> "$GITHUB_OUTPUT"
+          echo "Fertige Clips: $n"
+
+      - name: Meldung wenn nichts uebrig ist
+        if: steps.count.outputs.n == '0'
+        run: |
+          {
+            echo "## Keine guten Clips gefunden"
+            echo
+            echo "Gemini hat in diesem VOD-Ausschnitt nichts gefunden, das stark genug ist, oder die zweite Runde hat alle Kandidaten aussortiert. Es gibt deshalb keinen Download. Die Begruendungen stehen bei den einzelnen Clip-Jobs, die Kandidatenliste im Artefakt \"auswahl\"."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Alle Clips zusammenfassen
+        if: steps.count.outputs.n != '0'
+        uses: actions/upload-artifact/merge@v4
         with:
           name: fertige-clips
           pattern: clip-*
