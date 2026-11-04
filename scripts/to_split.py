@@ -1,9 +1,9 @@
 """Wandelt ein 16:9-Video in 9:16 um: oben die Facecam, unten das Gameplay (leicht gezoomt,
-ohne Facecam im Bild).
+ohne Facecam im Bild). Optional werden Untertitel eingebrannt.
 
-Aufruf: python scripts/to_split.py eingabe.mp4 ausgabe.mp4 facecam.json
+Aufruf: python scripts/to_split.py eingabe.mp4 ausgabe.mp4 facecam.json [untertitel.ass]
 
-Ohne erkannte Facecam wird das alte Layout (to_vertical.py) benutzt.
+Ohne erkannte Facecam wird das alte Layout (to_vertical.py) benutzt, ebenfalls mit Untertiteln.
 """
 import json
 import os
@@ -11,6 +11,7 @@ import subprocess
 import sys
 
 src, dst, face_json = sys.argv[1], sys.argv[2], sys.argv[3]
+ass = sys.argv[4] if len(sys.argv) > 4 and os.path.exists(sys.argv[4]) else None
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 W, H = 1080, 1920
@@ -25,7 +26,10 @@ def even(n):
 
 def fallback(reason):
     print("Altes Layout wegen:", reason)
-    subprocess.run([sys.executable, os.path.join(HERE, "to_vertical.py"), src, dst], check=True)
+    cmd = [sys.executable, os.path.join(HERE, "to_vertical.py"), src, dst]
+    if ass:
+        cmd.append(ass)
+    subprocess.run(cmd, check=True)
     sys.exit(0)
 
 
@@ -100,13 +104,14 @@ if crop is None:
 cx, cy, cw, ch = crop
 print(f"Facecam {fw}x{fh} bei {fx0},{fy0}; Gameplay {cw}x{ch} bei {cx},{cy}; oben {top_h}px, unten {bottom_h}px")
 
+sub_filter = f",ass={ass}" if ass else ""
 filter_complex = (
     "[0:v]split=2[a][b];"
     f"[a]crop={fw}:{fh}:{fx0}:{fy0},"
     f"scale={W}:{top_h}:force_original_aspect_ratio=increase:flags=lanczos,"
     f"crop={W}:{top_h},setsar=1[top];"
     f"[b]crop={cw}:{ch}:{cx}:{cy},scale={W}:{bottom_h}:flags=lanczos,setsar=1[bot];"
-    "[top][bot]vstack=inputs=2,format=yuv420p[v]"
+    f"[top][bot]vstack=inputs=2{sub_filter},format=yuv420p[v]"
 )
 
 subprocess.run(
