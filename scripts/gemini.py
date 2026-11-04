@@ -29,8 +29,18 @@ def image_part(path):
     return {"inline_data": {"mime_type": "image/jpeg", "data": data}}
 
 
+def video_part(path):
+    """Ein kurzes MP4 als Video-Teil (inline, deshalb nur fuer kleine Dateien unter ca. 15 MB)."""
+    size = os.path.getsize(path)
+    if size > 15 * 1024 * 1024:
+        raise ValueError(f"Video zu gross fuer inline: {size / 1024 / 1024:.1f} MB")
+    with open(path, "rb") as f:
+        data = base64.b64encode(f.read()).decode()
+    return {"inline_data": {"mime_type": "video/mp4", "data": data}}
+
+
 def ask(parts, schema, temperature=0.3, attempts=4):
-    """Schickt parts (Text und Bilder) an Gemini und gibt die Antwort als JSON-Objekt zurueck.
+    """Schickt parts (Text, Bilder, Video) an Gemini und gibt die Antwort als JSON-Objekt zurueck.
 
     attempts = Versuche pro Modell (bei Limit oder Ueberlastung wird kurz gewartet)."""
     key = os.environ["GEMINI_API_KEY"]
@@ -60,7 +70,7 @@ def ask(parts, schema, temperature=0.3, attempts=4):
                 headers={"Content-Type": "application/json", "x-goog-api-key": key},
             )
             try:
-                with urllib.request.urlopen(req, timeout=180) as r:
+                with urllib.request.urlopen(req, timeout=240) as r:
                     resp = json.load(r)
                 text = resp["candidates"][0]["content"]["parts"][0]["text"]
                 result = json.loads(text)
