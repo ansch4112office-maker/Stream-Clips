@@ -3,13 +3,13 @@
 Aufruf: python scripts/detect_facecam.py facecam.json debug.jpg snip1.mp4 [snip2.mp4 ...]
 
 Aus jedem kurzen Video werden zwei Bilder entnommen. Gemini wird dreimal gefragt, jeweils mit einer
-anderen Auswahl der Bilder. Gilt nur, wenn mindestens zwei Durchlaeufe eine plausible Box melden und
-diese Boxen sich klar ueberlappen. Das Ergebnis ist der Median der uebereinstimmenden Boxen.
-Zwei Durchlaeufe, die sich widersprechen, ergeben lieber "keine Facecam" (dann wird das normale
-9:16-Layout benutzt) als eine falsche Box.
+anderen Auswahl der Bilder. Es reicht, wenn ein Durchlauf eine plausible Box meldet. Melden mehrere
+Durchlaeufe eine Box, werden nur die verwendet, die sich klar ueberlappen (Median). Widersprechen
+sich die Boxen komplett, gibt es lieber "keine Facecam" (dann wird das normale 9:16-Layout
+benutzt) als eine falsche Box.
 
 Schreibt facecam.json:
-  {"found": true, "box": [x0, y0, x1, y1], "runs": 3, "agree": 3}   (Anteile 0 bis 1, oben links = 0,0)
+  {"found": true, "box": [x0, y0, x1, y1], "runs": 3, "agree": 1}   (Anteile 0 bis 1, oben links = 0,0)
   {"found": false, "reason": "..."}
 
 Dieses Skript bricht nie ab: Bei jedem Problem steht found=false in der Datei.
@@ -27,15 +27,16 @@ out_path, debug_path = sys.argv[1], sys.argv[2]
 videos = sys.argv[3:]
 
 PROMPT = """Das sind {n} Bilder aus demselben Twitch-Stream.
-Finde die Facecam: das Live-Kamerabild des Streamers (eine Person vor der Kamera), das ins
-Spielbild eingeblendet ist. Sie sitzt meistens in einer Ecke, oft mit Rahmen.
+Finde die Facecam: das Live-Kamerabild des Streamers (eine Person vor der Kamera).
+Sie kann in einer Ecke, am Rand oder in einem eigenen Bereich neben dem Spiel liegen, auch wenn sie
+nicht ueber dem Gameplay eingeblendet ist. Oft hat sie einen Rahmen.
 
 Gib EIN Rechteck zurueck, das die Facecam auf allen Bildern komplett umfasst, aber moeglichst
 nichts vom Spiel. Koordinaten normiert auf 0 bis 1000 (0,0 = oben links, 1000,1000 = unten rechts).
 
-Setze found auf false, wenn keine eingeblendete Facecam zu sehen ist (zum Beispiel nur Spiel,
-oder die Kamera fuellt das ganze Bild). Eine Person, die im Spiel selbst vorkommt (Spielfigur,
-Video im Spiel), ist keine Facecam.
+Setze found auf false, wenn keine Facecam zu sehen ist (zum Beispiel nur Spiel, oder die Kamera
+fuellt das ganze Bild). Eine Person, die im Spiel selbst vorkommt (Spielfigur, Video im Spiel),
+ist keine Facecam.
 """
 
 SCHEMA = {
@@ -51,6 +52,8 @@ SCHEMA = {
 }
 
 MIN_AGREE_IOU = 0.5
+MIN_BOXES = 1  # so viele Durchlaeufe muessen eine plausible Box melden
+MIN_AGREE = 1  # so viele Boxen muessen sich mit dem Median ueberlappen
 
 
 def duration(path):
@@ -140,12 +143,12 @@ def detect():
             boxes.append(box)
 
     runs = len(subsets)
-    if len(boxes) < 2:
+    if len(boxes) < MIN_BOXES:
         return {"found": False, "reason": f"nur {len(boxes)} von {runs} Durchlaeufen haben eine Facecam gemeldet"}
 
     med = median_box(boxes)
     agree = [b for b in boxes if iou(b, med) >= MIN_AGREE_IOU]
-    if len(agree) < 2:
+    if len(agree) < MIN_AGREE:
         return {"found": False, "reason": f"Durchlaeufe widersprechen sich: {boxes}"}
 
     x0, y0, x1, y1 = median_box(agree)
