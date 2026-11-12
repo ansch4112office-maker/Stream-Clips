@@ -1,2 +1,2 @@
 # Stream-Clips
-Findet virale Clips aus Stream-VODs
+Findet Clips aus Stream-VODs die möglichst viral gehen
