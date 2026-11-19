@@ -311,6 +311,7 @@ jobs:
           mkdir -p fertig
           python scripts/to_split.py trimmed.mp4 "fertig/$CLIP_NAME.mp4" face/facecam.json subs.ass
           jq -r .title review.json > "fertig/$CLIP_NAME.txt"
+          cp review.json "fertig/$CLIP_NAME.json"
 
       - name: Fertigen Clip hochladen
         if: steps.review.outputs.keep == 'true'
@@ -320,7 +321,8 @@ jobs:
           path: |
             fertig/${{ matrix.clip.name }}.mp4
             fertig/${{ matrix.clip.name }}.txt
-          retention-days: 7
+            fertig/${{ matrix.clip.name }}.json
+          retention-days: 1
 
   sammeln:
     name: Alle Clips in einen Download
