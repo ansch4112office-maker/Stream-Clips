@@ -1,4 +1,5 @@
-name: Auto-Clips
+name: Auto-Clips#
+run-name: Auto-Clips ${{ github.event.inputs.streamer }}
 
 # Ein Klick: VOD rein, fertige Shorts raus.
 # Ablauf: Transkript (Whisper small, mit Wortzeiten) -> Gemini waehlt Kandidaten ->
