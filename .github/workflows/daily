@@ -59,6 +59,8 @@ jobs:
           python scripts/daily_collect.py
 
       - name: Beste Clips auswaehlen und hochladen
+        env:
+          PRIVACY: private
         run: |
           if [ ! -d clips ]; then echo "Keine Clips."; exit 0; fi
           python scripts/daily_publish.py
