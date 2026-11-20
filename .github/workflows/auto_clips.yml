@@ -39,7 +39,7 @@ jobs:
   analyze:
     name: Transkript und Clip-Auswahl
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 360
     outputs:
       clips: ${{ steps.pick.outputs.clips }}
     env:
@@ -242,14 +242,14 @@ jobs:
         with:
           name: facecam
           path: out/
-          retention-days: 7
+          retention-days: 2
 
   cut:
     name: Clip ${{ matrix.clip.name }}
     needs: [analyze, facecam]
     if: ${{ !cancelled() && needs.analyze.result == 'success' && needs.analyze.outputs.clips != '' && needs.analyze.outputs.clips != '[]' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       max-parallel: 2
