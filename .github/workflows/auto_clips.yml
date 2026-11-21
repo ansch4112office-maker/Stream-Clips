@@ -1,12 +1,14 @@
-name: Auto-Clips#
-run-name: Auto-Clips ${{ github.event.inputs.streamer }}
+name: Auto-Clips
 
-# Ein Klick: VOD rein, fertige Shorts raus.
-# Ablauf: Transkript (Whisper small, mit Wortzeiten) -> Gemini waehlt Kandidaten ->
+# Ein Klick: VOD rein, Kandidaten raus.
+# Ablauf: Transkript (Whisper tiny, nur zur Orientierung) + laute Stellen -> Chat-Replay und
+# Zuschauer-Clips (Chat-Spitzen) -> Gemini waehlt Kandidaten aus den staerksten Zonen ->
 # Facecam wird einmal pro Streamer gefunden und gemerkt ->
 # jeder Kandidat wird geschnitten, von Gemini als Video geprueft (behalten oder aussortieren,
-# Titel und Laenge korrigieren), bekommt Untertitel und das Layout oben Facecam / unten Gameplay ->
-# alles in einem Download. Gibt es keine guten Clips, steht das in der Zusammenfassung des Laufs.
+# Titel und Laenge korrigieren, langweiligen Anfang kuerzen) und bekommt das Layout oben Facecam /
+# unten Gameplay, noch OHNE Untertitel -> alles in einem Download.
+# Die Untertitel (Whisper large-v3-turbo) entstehen erst in daily.yml, nur fuer die Gewinner.
+# Gibt es keine guten Clips, steht das in der Zusammenfassung des Laufs.
 
 on:
   workflow_dispatch:
@@ -37,9 +39,9 @@ permissions:
 
 jobs:
   analyze:
-    name: Transkript und Clip-Auswahl
+    name: Transkript, Chat und Clip-Auswahl
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 300
     outputs:
       clips: ${{ steps.pick.outputs.clips }}
     env:
@@ -74,10 +76,14 @@ jobs:
           yt-dlp --download-sections "*$START-$END" --force-keyframes-at-cuts -x --audio-format wav --postprocessor-args "ffmpeg:-ac 1 -ar 16000" -o "audio.%(ext)s" "$VOD_URL"
           ls -lh audio.wav
 
-      - name: Transkribieren und laute Momente finden
+      - name: Transkribieren (schnell) und laute Momente finden
         env:
           PYTHONUNBUFFERED: "1"
-          WHISPER_MODEL: small
+          # tiny reicht zur Orientierung und zum Einrasten der Zeiten. Die Untertitel kommen spaeter
+          # aus einem eigenen Durchlauf mit dem besten Modell. Wenn zu oft "Anfang nicht im Transkript
+          # gefunden" im Log steht, hier auf base hochstellen.
+          WHISPER_MODEL: ${{ vars.WHISPER_MODEL || 'tiny' }}
+          WHISPER_LANG: ${{ vars.WHISPER_LANG || 'de' }}
         run: |
           mkdir -p data
 
@@ -117,6 +123,23 @@ jobs:
           free -m
           df -h .
           sudo dmesg 2>/dev/null | grep -iE "out of memory|oom|killed process" | tail -n 10 || true
+
+      # Optional: Klappt das nicht (Chat gesperrt, VOD ohne Chat, Download-Fehler), laeuft alles wie
+      # vorher nur mit Lautstaerke und Transkript weiter. Zuschauer-Clips gibt es nur, wenn die
+      # Secrets TWITCH_CLIENT_ID und TWITCH_CLIENT_SECRET gesetzt sind.
+      - name: Chat laden und Chat-Spitzen berechnen
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
+          TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
+        run: |
+          python scripts/fetch_chat.py "$VOD_URL" "$START" "$END" chat.json twitch_clips.json
+          if [ -s chat.json ] || [ -s twitch_clips.json ]; then
+            python scripts/chat_peaks.py data/latest.json chat.json twitch_clips.json
+          else
+            echo "Kein Chat und keine Zuschauer-Clips, es zaehlen nur Lautstaerke und Transkript."
+          fi
 
       - name: Kandidaten mit Gemini aussuchen
         id: pick
@@ -181,8 +204,7 @@ jobs:
         if: steps.have.outputs.cached == 'false'
         run: |
           sudo apt-get update && sudo apt-get install -y ffmpeg
-          pip install yt-dlp opencv-python-headless numpy
-
+          pip install yt-dlp
 
       - uses: actions/download-artifact@v4
         if: steps.have.outputs.cached == 'false'
@@ -243,14 +265,14 @@ jobs:
         with:
           name: facecam
           path: out/
-          retention-days: 2
+          retention-days: 7
 
   cut:
     name: Clip ${{ matrix.clip.name }}
     needs: [analyze, facecam]
     if: ${{ !cancelled() && needs.analyze.result == 'success' && needs.analyze.outputs.clips != '' && needs.analyze.outputs.clips != '[]' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -268,7 +290,7 @@ jobs:
 
       - name: Tools installieren
         run: |
-          sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+          sudo apt-get update && sudo apt-get install -y ffmpeg
           pip install yt-dlp
 
       - uses: actions/download-artifact@v4
@@ -300,30 +322,31 @@ jobs:
         run: |
           python scripts/review_clips.py raw.mp4 auswahl/data/latest.json review.json trimmed.mp4
           echo "keep=$(jq -r .keep review.json)" >> "$GITHUB_OUTPUT"
-          jq -r --arg n "$CLIP_NAME" '"**" + $n + "** (" + .title + "): " + (if .keep then "behalten, " + (.laenge|tostring) + " s" else "aussortiert" end) + " | Score " + (.score|tostring) + (if .geprueft then "" else " | NICHT geprueft, Gemini nicht erreichbar" end) + " | " + .reason + "\n"' review.json >> "$GITHUB_STEP_SUMMARY"
+          jq -r --arg n "$CLIP_NAME" '"**" + $n + "** (" + .title + "): " + (if .keep then "behalten, " + (.laenge|tostring) + " s" else "aussortiert" end) + " | Score " + (.score|tostring) + (if .start_langweilig then " | Anfang gekuerzt um " + (.start_verschoben|tostring) + " s" else "" end) + (if .geprueft then "" else " | NICHT geprueft, Gemini nicht erreichbar" end) + " | " + .reason + "\n"' review.json >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Untertitel bauen
-        if: steps.review.outputs.keep == 'true'
-        run: python scripts/subtitles.py auswahl/data/latest.json review.json subs.ass
-
-      - name: Layout bauen (oben Facecam, unten Gameplay, mit Untertiteln)
+      # Hier noch ohne Untertitel: Die bekommen nur die Gewinner in daily.yml, mit dem besten
+      # Whisper-Modell. Dafuer wandert der geschnittene 16:9-Clip (_src) mit ins Artefakt.
+      - name: Layout bauen (oben Facecam, unten Gameplay) und Quelle fuer die Endfassung ablegen
         if: steps.review.outputs.keep == 'true'
         run: |
           mkdir -p fertig
-          python scripts/to_split.py trimmed.mp4 "fertig/$CLIP_NAME.mp4" face/facecam.json subs.ass
+          python scripts/to_split.py trimmed.mp4 "fertig/$CLIP_NAME.mp4" face/facecam.json
           jq -r .title review.json > "fertig/$CLIP_NAME.txt"
           cp review.json "fertig/$CLIP_NAME.json"
+          cp trimmed.mp4 "fertig/${CLIP_NAME}_src.mp4"
+          if [ -s face/facecam.json ]; then
+            cp face/facecam.json "fertig/${CLIP_NAME}_facecam.json"
+          else
+            echo '{"found": false, "reason": "keine Facecam-Datei"}' > "fertig/${CLIP_NAME}_facecam.json"
+          fi
 
       - name: Fertigen Clip hochladen
         if: steps.review.outputs.keep == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: clip-${{ matrix.clip.name }}
-          path: |
-            fertig/${{ matrix.clip.name }}.mp4
-            fertig/${{ matrix.clip.name }}.txt
-            fertig/${{ matrix.clip.name }}.json
-          retention-days: 1
+          path: fertig/
+          retention-days: 7
 
   sammeln:
     name: Alle Clips in einen Download
