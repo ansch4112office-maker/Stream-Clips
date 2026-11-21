@@ -11,7 +11,7 @@ Die Ausgabe enthaelt "transcript" (Segmente), "words" (jedes Wort mit Start und 
 und "loud_moments".
 
 Einstellungen ueber Umgebungsvariablen (alle optional):
-  WHISPER_MODEL    Modellgroesse, Standard "small"
+  WHISPER_MODEL    Modellgroesse, Standard "tiny"
   CHUNK_SEC        Laenge eines Stuecks in Sekunden, Standard 900 (wird auf ein Vielfaches von 5 gerundet)
   WHISPER_THREADS  Rechenkerne fuer Whisper, Standard: alle Kerne minus einer (mindestens 1),
                    damit der GitHub-Runner selbst genug Luft hat
@@ -28,7 +28,7 @@ from faster_whisper import WhisperModel
 
 audio_path, out_path = sys.argv[1], sys.argv[2]
 
-MODEL = os.environ.get("WHISPER_MODEL", "small")
+MODEL = os.environ.get("WHISPER_MODEL", "tiny")
 WIN_SEC = 5  # Fensterbreite fuer die Lautstaerke
 CHUNK_SEC = max(WIN_SEC, int(os.environ.get("CHUNK_SEC", "900")) // WIN_SEC * WIN_SEC)
 THREADS = int(os.environ.get("WHISPER_THREADS") or max(1, (os.cpu_count() or 2) - 1))
@@ -68,7 +68,7 @@ model = WhisperModel(MODEL, device="cpu", compute_type="int8", cpu_threads=THREA
 transcript = []  # Segmente mit Zeitstempeln
 words = []  # einzelne Woerter mit Zeitstempeln (fuer Untertitel und genaues Schneiden)
 rms = []  # Lautstaerke pro 5-Sekunden-Fenster ueber die ganze Datei
-language = None  # wird beim ersten sicheren Treffer festgelegt und danach beibehalten
+language = os.environ.get("WHISPER_LANG") or None  # wird beim ersten sicheren Treffer festgelegt und danach beibehalten
 
 win = rate * WIN_SEC
 for idx in range(n_chunks):
