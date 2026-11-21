@@ -1,41 +1,51 @@
-"""Baut aus den Wortzeiten eine Untertitel-Datei (.ass) im Shorts-Stil: 2 bis 3 Woerter pro Einblendung,
-gross, weiss mit dickem schwarzem Rand.
+"""Baut aus den Wortzeiten eine Untertitel-Datei (.ass) im Twitch-/Shorts-Stil: 2 bis 3 Woerter pro
+Einblendung, gross, weiss mit dickem schwarzem Rand. Das gerade gesprochene Wort leuchtet in
+Akzentfarbe (Standard gelb) und poppt kurz auf.
 
-Aufruf: python scripts/subtitles.py words.json subs.ass
+Aufruf: python scripts/subtitles.py data/latest.json review.json subs.ass
 
-words.json kommt aus finalize.py (Transkript des fertig geschnittenen Clips mit dem besten
-Whisper-Modell): {"duration": Sekunden, "words": [{"word", "start", "end"}, ...]}. Alle Zeiten
-sind relativ zum Clip (0 = Clipanfang), es muss nichts mehr umgerechnet werden.
-Gibt es keine Woerter, wird keine Datei geschrieben (der Clip bekommt dann keine Untertitel).
+Die Zeiten werden auf den fertig zugeschnittenen Clip umgerechnet (Start = review.json start_abs).
+Gibt es keine Wortzeiten oder keine Woerter im Clip, wird keine Datei geschrieben (der Clip bekommt
+dann einfach keine Untertitel).
 
 Einstellungen ueber Umgebungsvariablen (alle optional):
   SUB_Y       senkrechte Position der Untertitel im 1080x1920-Bild, Standard 1250
   SUB_SIZE    Schriftgroesse, Standard 88
   SUB_WORDS   hoechstens so viele Woerter pro Einblendung, Standard 3
+  SUB_HL      Farbe des gerade gesprochenen Wortes als RRGGBB, Standard FFE100 (gelb),
+              z. B. 00FF5A fuer gruen
+  SUB_POP     Pop-Groesse in Prozent beim Einblenden eines Wortes, Standard 118 (100 = aus)
 """
 import json
 import os
 import re
 import sys
 
-words_path, out = sys.argv[1:3]
+latest, review, out = sys.argv[1:4]
 
 SUB_Y = int(os.environ.get("SUB_Y", "1250"))
 SIZE = int(os.environ.get("SUB_SIZE", "88"))
 MAX_WORDS = int(os.environ.get("SUB_WORDS", "3"))
+HL = os.environ.get("SUB_HL", "FFE100").strip().lstrip("#")
+POP = int(os.environ.get("SUB_POP", "118"))
 PAUSE = 0.6  # ab dieser Pause (Sekunden) beginnt eine neue Einblendung
 MAX_CHARS = 22  # laengere Einblendungen passen nicht mehr in die Bildbreite
 
-with open(words_path, encoding="utf-8") as f:
-    data = json.load(f)
+if not re.fullmatch(r"[0-9A-Fa-f]{6}", HL):
+    HL = "FFE100"
+# ASS nutzt BGR statt RGB
+HL_ASS = f"&H{HL[4:6]}{HL[2:4]}{HL[0:2]}&"
 
-t_end = float(data.get("duration") or 0)
-words = [w for w in data.get("words", []) if w["word"].strip() and (not t_end or w["start"] < t_end)]
+with open(latest, encoding="utf-8") as f:
+    d = json.load(f)
+with open(review, encoding="utf-8") as f:
+    r = json.load(f)
+
+t0, t1 = r["start_abs"], r["end_abs"]
+words = [w for w in d.get("words", []) if w["end"] > t0 and w["start"] < t1 and w["word"].strip()]
 if not words:
-    print("Keine Woerter im Clip, keine Untertitel.")
+    print("Keine Wortzeiten im Clip, keine Untertitel.")
     sys.exit(0)
-if not t_end:
-    t_end = max(w["end"] for w in words) + 0.5
 
 
 def clean(w):
@@ -82,18 +92,43 @@ Style: Default,DejaVu Sans,{SIZE},&H00FFFFFF,&H000000FF,&H00000000,&H64000000,-1
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
+
+def render(g, active):
+    """Text der Gruppe, Wort 'active' leuchtet und poppt kurz auf, der Rest bleibt weiss."""
+    parts = []
+    for k, x in enumerate(g):
+        if k == active:
+            pop = (
+                f"\\fscx{POP}\\fscy{POP}\\t(0,120,\\fscx100\\fscy100)" if POP != 100 else ""
+            )
+            parts.append(f"{{\\1c{HL_ASS}{pop}}}{x['text']}{{\\r}}")
+        else:
+            parts.append(x["text"])
+    return " ".join(parts)
+
+
 lines = [header]
+n_events = 0
 for i, g in enumerate(groups):
-    start = g[0]["start"]
-    end = g[-1]["end"] + 0.25
+    group_end = g[-1]["end"] - t0 + 0.25
     if i + 1 < len(groups):  # nicht in die naechste Einblendung hineinragen
-        end = min(end, groups[i + 1][0]["start"])
-    end = min(end, t_end)
-    if end - start < 0.15:
-        end = start + 0.15
-    text = " ".join(x["text"] for x in g)
-    lines.append(f"Dialogue: 0,{ts(start)},{ts(end)},Default,,0,0,0,,{{\\pos(540,{SUB_Y})}}{text}\n")
+        group_end = min(group_end, groups[i + 1][0]["start"] - t0)
+    group_end = min(group_end, t1 - t0)
+
+    for k, x in enumerate(g):
+        start = x["start"] - t0
+        # Wort leuchtet bis das naechste beginnt, das letzte bis zum Ende der Einblendung
+        end = g[k + 1]["start"] - t0 if k + 1 < len(g) else group_end
+        if k == 0:
+            start = max(start, 0.0)
+        if end - start < 0.08:
+            end = start + 0.08
+        text = render(g, k)
+        lines.append(
+            f"Dialogue: 0,{ts(start)},{ts(end)},Default,,0,0,0,,{{\\pos(540,{SUB_Y})}}{text}\n"
+        )
+        n_events += 1
 
 with open(out, "w", encoding="utf-8") as f:
     f.write("".join(lines))
-print(f"Untertitel: {len(groups)} Einblendungen aus {len(words)} Woertern -> {out}")
+print(f"Untertitel: {len(groups)} Einblendungen ({n_events} Wort-Schritte) aus {len(words)} Woertern -> {out}")
