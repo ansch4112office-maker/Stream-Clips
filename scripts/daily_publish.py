@@ -1,10 +1,17 @@
-"""Waehlt aus allen Clips des Tages die besten aus und laedt sie auf YouTube hoch.
+"""Waehlt aus allen Clips des Tages die besten aus, baut davon die Endfassung (beste Untertitel) und
+laedt sie auf YouTube hoch.
 
 Aufruf: python scripts/daily_publish.py
 
-Erwartet die Clips in clips/<streamer>/NAME.mp4 mit NAME.txt (Titel) und NAME.json (review.json).
+Erwartet die Clips in clips/<streamer>/ mit
+  NAME.mp4           Layout ohne Untertitel (nur zur Auswahl und als Rueckfall)
+  NAME.txt / NAME.json  Titel / Pruefung (review.json)
+  NAME_src.mp4       geschnittener 16:9-Clip, Quelle fuer die Endfassung
+  NAME_facecam.json  Facecam-Position
 Gemini schaut einmal ueber alle Kandidaten und waehlt die besten, das Skript achtet darauf, dass
 nicht alles vom selben Streamer kommt. Wenn Gemini ausfaellt, entscheidet der Score aus der Pruefung.
+Nur fuer die Gewinner laeuft danach finalize.py (Whisper large-v3-turbo, Untertitel, Layout). Klappt
+das nicht, wird der Clip ohne Untertitel hochgeladen.
 
 Secrets als Umgebungsvariablen: YT_CLIENT_ID, YT_CLIENT_SECRET, YT_REFRESH_TOKEN, GEMINI_API_KEY
 
@@ -16,6 +23,7 @@ Optional:
 import glob
 import json
 import os
+import subprocess
 import sys
 
 from google.oauth2.credentials import Credentials
@@ -23,12 +31,15 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
+HERE = os.path.dirname(os.path.abspath(__file__))
 MAX_UPLOADS = int(os.environ.get("MAX_UPLOADS", "4"))
 MAX_PER = int(os.environ.get("MAX_PER_STREAMER", "2"))
 PRIVACY = os.environ.get("PRIVACY", "public")
 
 cands = []
 for mp4 in sorted(glob.glob("clips/**/*.mp4", recursive=True)):
+    if mp4.endswith(("_src.mp4", "_final.mp4")):
+        continue
     base = mp4[:-4]
     streamer = mp4.split(os.sep)[1]
     meta = {}
@@ -43,6 +54,7 @@ for mp4 in sorted(glob.glob("clips/**/*.mp4", recursive=True)):
         "id": len(cands), "file": mp4, "streamer": streamer, "title": title or "Twitch Clip",
         "kind": meta.get("kind", ""), "score": float(meta.get("score", 0)),
         "reason": meta.get("reason", ""), "laenge": meta.get("laenge", 0),
+        "untertitel": False,
     })
 
 if not cands:
@@ -97,6 +109,21 @@ except (Exception, SystemExit) as e:
 chosen = limit(ranked)
 print("Auswahl:", [(cands[i]["streamer"], cands[i]["title"]) for i in chosen])
 
+# ---------- Endfassung nur fuer die Gewinner: bestes Whisper-Modell, Untertitel, Layout ----------
+for i in chosen:
+    c = cands[i]
+    base = c["file"][:-4]
+    src, face, final = base + "_src.mp4", base + "_facecam.json", base + "_final.mp4"
+    if not os.path.exists(src):
+        print(f"Keine Quelldatei fuer die Endfassung ({src}), nehme den Clip ohne Untertitel.")
+        continue
+    print("Endfassung:", c["title"])
+    r = subprocess.run([sys.executable, os.path.join(HERE, "finalize.py"), src, face, final])
+    if r.returncode == 0 and os.path.exists(final):
+        c["file"], c["untertitel"] = final, True
+    else:
+        print("Endfassung fehlgeschlagen, nehme den Clip ohne Untertitel:", c["title"])
+
 creds = Credentials(
     None,
     refresh_token=os.environ["YT_REFRESH_TOKEN"],
@@ -132,7 +159,7 @@ for i in chosen:
             _, resp = req.next_chunk()
         link = f"https://youtu.be/{resp['id']}"
         print("hochgeladen:", c["title"], link)
-        summary.append(f"- [{c['title']}]({link}) ({st})")
+        summary.append(f"- [{c['title']}]({link}) ({st})" + ("" if c["untertitel"] else " - OHNE Untertitel (Endfassung fehlgeschlagen)"))
     except HttpError as e:
         msg = str(e)
         print("Upload fehlgeschlagen:", c["title"], msg[:300])
