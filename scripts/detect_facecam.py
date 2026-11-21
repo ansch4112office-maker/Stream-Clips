@@ -118,6 +118,8 @@ def expand(face):
 
 
 def detect_opencv(frames):
+    if cv2 is None:
+        return None, "OpenCV nicht installiert"
     cascades = []
     for name in ("haarcascade_frontalface_default.xml", "haarcascade_frontalface_alt2.xml"):
         c = cv2.CascadeClassifier(os.path.join(cv2.data.haarcascades, name))
