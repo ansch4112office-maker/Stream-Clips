@@ -1,7 +1,8 @@
 name: Taeglich
 
 # Jeden Tag: neueste VODs aller Streamer aus streamers.txt suchen, auto_clips.yml dafuer starten,
-# warten, die besten Clips auswaehlen und auf YouTube hochladen.
+# warten, die besten Clips auswaehlen, davon die Endfassung mit besten Untertiteln bauen
+# (Whisper large-v3-turbo, nur fuer die Gewinner) und auf YouTube hochladen.
 # Cron laeuft in UTC: 02:00 UTC = 03:00 Uhr deutscher Winterzeit (im Sommer 04:00 Uhr).
 
 on:
@@ -20,7 +21,7 @@ concurrency:
 jobs:
   daily:
     runs-on: ubuntu-latest
-    timeout-minutes: 355
+    timeout-minutes: 360
     env:
       GH_TOKEN: ${{ github.token }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -28,6 +29,8 @@ jobs:
       YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
       YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
       YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+      FINAL_WHISPER_MODEL: ${{ vars.FINAL_WHISPER_MODEL || 'large-v3-turbo' }}
+      FINAL_WHISPER_LANG: ${{ vars.FINAL_WHISPER_LANG || 'de' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -36,7 +39,22 @@ jobs:
           python-version: "3.11"
 
       - name: Tools installieren
-        run: pip install yt-dlp google-api-python-client google-auth
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+          pip install yt-dlp google-api-python-client google-auth numpy
+          pip install --upgrade faster-whisper
+
+      # Das grosse Modell wird gemerkt, damit es nicht jeden Tag neu heruntergeladen wird.
+      - name: Gemerktes Whisper-Modell laden
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: whisper-${{ env.FINAL_WHISPER_MODEL }}-v1
+
+      # Einmal vorladen, solange sowieso gewartet wird. Klappt das nicht, versucht finalize.py es spaeter nochmal.
+      - name: Whisper-Modell vorladen
+        continue-on-error: true
+        run: python -c "from faster_whisper import WhisperModel; WhisperModel('${{ env.FINAL_WHISPER_MODEL }}', device='cpu', compute_type='int8')"
 
       - name: Neue VODs suchen und Clip-Laeufe starten
         run: python scripts/daily_start.py
@@ -50,7 +68,7 @@ jobs:
 
       - name: Auf die Clip-Laeufe warten und Clips laden
         env:
-          MAX_WAIT_MIN: "330"
+          MAX_WAIT_MIN: "320"  # 360 Minuten Gesamtlimit minus Platz fuer Endfassung und Upload
         run: |
           if [ "$(jq length runs.json)" = "0" ]; then
             echo "Keine neuen VODs heute." | tee -a "$GITHUB_STEP_SUMMARY"
@@ -58,9 +76,7 @@ jobs:
           fi
           python scripts/daily_collect.py
 
-      - name: Beste Clips auswaehlen und hochladen
-        env:
-          PRIVACY: private
+      - name: Beste Clips auswaehlen, Endfassung bauen und hochladen
         run: |
           if [ ! -d clips ]; then echo "Keine Clips."; exit 0; fi
           python scripts/daily_publish.py
