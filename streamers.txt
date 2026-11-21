@@ -4,3 +4,5 @@ wichtiger
 trymacs
 papaplatte
 zarbex
+lacy
+marco_scm
