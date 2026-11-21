@@ -1,11 +1,12 @@
 """Baut aus den Wortzeiten eine Untertitel-Datei (.ass) im Shorts-Stil: 2 bis 3 Woerter pro Einblendung,
 gross, weiss mit dickem schwarzem Rand.
 
-Aufruf: python scripts/subtitles.py data/latest.json review.json subs.ass
+Aufruf: python scripts/subtitles.py words.json subs.ass
 
-Die Zeiten werden auf den fertig zugeschnittenen Clip umgerechnet (Start = review.json start_abs).
-Gibt es keine Wortzeiten oder keine Woerter im Clip, wird keine Datei geschrieben (der Clip bekommt
-dann einfach keine Untertitel).
+words.json kommt aus finalize.py (Transkript des fertig geschnittenen Clips mit dem besten
+Whisper-Modell): {"duration": Sekunden, "words": [{"word", "start", "end"}, ...]}. Alle Zeiten
+sind relativ zum Clip (0 = Clipanfang), es muss nichts mehr umgerechnet werden.
+Gibt es keine Woerter, wird keine Datei geschrieben (der Clip bekommt dann keine Untertitel).
 
 Einstellungen ueber Umgebungsvariablen (alle optional):
   SUB_Y       senkrechte Position der Untertitel im 1080x1920-Bild, Standard 1250
@@ -17,7 +18,7 @@ import os
 import re
 import sys
 
-latest, review, out = sys.argv[1:4]
+words_path, out = sys.argv[1:3]
 
 SUB_Y = int(os.environ.get("SUB_Y", "1250"))
 SIZE = int(os.environ.get("SUB_SIZE", "88"))
@@ -25,16 +26,16 @@ MAX_WORDS = int(os.environ.get("SUB_WORDS", "3"))
 PAUSE = 0.6  # ab dieser Pause (Sekunden) beginnt eine neue Einblendung
 MAX_CHARS = 22  # laengere Einblendungen passen nicht mehr in die Bildbreite
 
-with open(latest, encoding="utf-8") as f:
-    d = json.load(f)
-with open(review, encoding="utf-8") as f:
-    r = json.load(f)
+with open(words_path, encoding="utf-8") as f:
+    data = json.load(f)
 
-t0, t1 = r["start_abs"], r["end_abs"]
-words = [w for w in d.get("words", []) if w["end"] > t0 and w["start"] < t1 and w["word"].strip()]
+t_end = float(data.get("duration") or 0)
+words = [w for w in data.get("words", []) if w["word"].strip() and (not t_end or w["start"] < t_end)]
 if not words:
-    print("Keine Wortzeiten im Clip, keine Untertitel.")
+    print("Keine Woerter im Clip, keine Untertitel.")
     sys.exit(0)
+if not t_end:
+    t_end = max(w["end"] for w in words) + 0.5
 
 
 def clean(w):
@@ -83,11 +84,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 lines = [header]
 for i, g in enumerate(groups):
-    start = g[0]["start"] - t0
-    end = g[-1]["end"] - t0 + 0.25
+    start = g[0]["start"]
+    end = g[-1]["end"] + 0.25
     if i + 1 < len(groups):  # nicht in die naechste Einblendung hineinragen
-        end = min(end, groups[i + 1][0]["start"] - t0)
-    end = min(end, t1 - t0)
+        end = min(end, groups[i + 1][0]["start"])
+    end = min(end, t_end)
     if end - start < 0.15:
         end = start + 0.15
     text = " ".join(x["text"] for x in g)
