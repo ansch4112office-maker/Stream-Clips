@@ -23,7 +23,10 @@ import subprocess
 import sys
 import tempfile
 
-import cv2
+try:
+    import cv2
+except ImportError:  # dann läuft nur der Gemini-Rückfall
+    cv2 = None
 
 out_path, debug_path = sys.argv[1], sys.argv[2]
 videos = sys.argv[3:]
