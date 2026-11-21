@@ -1,5 +1,6 @@
 """Zweite Runde: Gemini schaut sich den Kandidaten als Video an, entscheidet ueber Behalten oder
 Aussortieren, korrigiert den Titel und legt Anfang und Ende (15 bis 45 Sekunden) endgueltig fest.
+Ein langweiliger Anfang wird abgeschnitten, damit der Clip direkt interessant startet.
 
 Aufruf: python scripts/review_clips.py raw.mp4 data/latest.json review.json trimmed.mp4
 
@@ -88,8 +89,14 @@ Daraus soll EIN Short werden. Eine erste Auswahl hat diesen Ausschnitt vorgeschl
   Zeitraum: Sekunde {plan_s:.0f} bis {plan_e:.0f}
   Titel: {TITLE}
   Art: {KIND}
-Die erste Auswahl hat nur das Transkript gesehen und kann falsch liegen. Entscheide selbst, nachdem
-du Bild und Ton wirklich angesehen hast.
+Die erste Auswahl hat nur das Transkript (und teils Chat-Daten) gesehen und kann falsch liegen.
+Entscheide selbst, nachdem du Bild und Ton wirklich angesehen hast.
+
+WICHTIG ZUM ANFANG: Der vorgeschlagene Start ist absichtlich eher zu frueh gesetzt, weil der Chat
+erst mit Verzoegerung auf Momente reagiert. Das Video hat ausserdem Puffer davor. Wenn die ersten
+Sekunden langweilig sind (Reden, Warten, Laufen ohne Geschehen, Menue, Ladebildschirm, Vorgeplaenkel),
+setze start so spaet, dass der Clip DIREKT interessant beginnt. Lass nur so viel Vorlauf, dass man in
+den ersten Sekunden versteht, was los ist. Sag in start_langweilig, ob du den Anfang kuerzen musstest.
 
 Transkript (Zeiten in Sekunden im Video):
 {transcript}
@@ -107,9 +114,10 @@ Entscheide:
   gewaehlten Zeitraum siehst und hoerst. Wenn der vorgeschlagene Titel nicht passt, schreib einen
   neuen. Kein Titel, der etwas verspricht, was nicht kommt.
 - start, end: Sekunden im Video. Der Clip ist {MIN_LEN:.0f} bis {MAX_LEN:.0f} Sekunden lang. Starte
-  kurz vor dem Einstieg (der Zuschauer muss in den ersten Sekunden verstehen, was los ist) und ende
-  kurz nach der Pointe, nie mitten im Satz. Nimm so viel wie noetig und so wenig wie moeglich;
-  Leerlauf am Anfang oder Ende wird abgeschnitten.
+  dort, wo es direkt interessant wird (siehe oben), und ende kurz nach der Pointe, nie mitten im
+  Satz. Nimm so viel wie noetig und so wenig wie moeglich; Leerlauf am Anfang oder Ende wird
+  abgeschnitten.
+- start_langweilig: true, wenn der vorgeschlagene Anfang langweilig war und du ihn gekuerzt hast.
 - reason: ein Satz, was im Clip passiert und warum du so entschieden hast.
 """
 
@@ -122,12 +130,14 @@ schema = {
         "title": {"type": "STRING"},
         "start": {"type": "NUMBER"},
         "end": {"type": "NUMBER"},
+        "start_langweilig": {"type": "BOOLEAN"},
         "reason": {"type": "STRING"},
     },
-    "required": ["keep", "score", "kind", "title", "start", "end", "reason"],
+    "required": ["keep", "score", "kind", "title", "start", "end", "start_langweilig", "reason"],
 }
 
 checked = True
+slow_start = False
 try:
     # attempts=2: lieber schnell weitermachen als ewig auf Gemini warten
     ans = ask([{"text": prompt}, video_part(preview)], schema, temperature=0.2, attempts=2)
@@ -135,6 +145,7 @@ try:
     kind = str(ans.get("kind", KIND)).strip().lower()
     title = str(ans.get("title") or TITLE).strip() or TITLE
     reason = str(ans.get("reason", ""))
+    slow_start = bool(ans.get("start_langweilig"))
     keep = bool(ans.get("keep")) and score >= MIN_SCORE and kind not in TALK_KINDS
     fit = fit_length(float(ans["start"]), float(ans["end"]), dur)
     if fit is None:
@@ -158,6 +169,8 @@ result = {
     "title": title,
     "title_vorher": TITLE,
     "reason": reason,
+    "start_langweilig": slow_start,
+    "start_verschoben": round(s - plan_s, 1),  # positiv = Anfang wurde gekuerzt
     "start_rel": round(s, 2),
     "end_rel": round(e, 2),
     "start_abs": round(SEG_START + s, 2),
