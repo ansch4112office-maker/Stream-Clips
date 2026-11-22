@@ -7,3 +7,4 @@ zarbex
 lacy
 marco_scm
 timgioh
+fregepaul
