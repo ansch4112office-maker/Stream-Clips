@@ -145,7 +145,6 @@ for i in chosen:
             "description": f"{c['title']}\n\n#{tag} #Clips #Twitch #viral #Shorts\n\nQuelle: https://www.twitch.tv/{st}",
             "tags": [tag, "Clips", "Twitch", "viral", "Shorts"],
             "categoryId": "20",
-            "defaultLanguage": "de",
         },
         "status": {"privacyStatus": PRIVACY, "selfDeclaredMadeForKids": False},
     }
