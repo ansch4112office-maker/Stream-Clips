@@ -32,8 +32,8 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-MAX_UPLOADS = int(os.environ.get("MAX_UPLOADS", "4"))
-MAX_PER = int(os.environ.get("MAX_PER_STREAMER", "2"))
+MAX_UPLOADS = int(os.environ.get("MAX_UPLOADS", "16"))
+MAX_PER = int(os.environ.get("MAX_PER_STREAMER", "3"))
 PRIVACY = os.environ.get("PRIVACY", "public")
 
 cands = []
