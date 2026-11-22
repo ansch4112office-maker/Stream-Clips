@@ -7,7 +7,7 @@ name: Taeglich
 
 on:
   schedule:
-    - cron: "0 2 * * *"
+    - cron: "17 1 * * *"
   workflow_dispatch:
 
 permissions:
