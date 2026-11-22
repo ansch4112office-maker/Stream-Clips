@@ -16,8 +16,8 @@ das nicht, wird der Clip ohne Untertitel hochgeladen.
 Secrets als Umgebungsvariablen: YT_CLIENT_ID, YT_CLIENT_SECRET, YT_REFRESH_TOKEN, GEMINI_API_KEY
 
 Optional:
-  MAX_UPLOADS         hoechstens so viele Videos pro Tag, Standard 4
-  MAX_PER_STREAMER    hoechstens so viele davon pro Streamer, Standard 2
+  MAX_UPLOADS         hoechstens so viele Videos pro Tag, Standard 16
+  MAX_PER_STREAMER    hoechstens so viele davon pro Streamer, Standard 3
   PRIVACY             public (Standard), unlisted oder private
 """
 import glob
