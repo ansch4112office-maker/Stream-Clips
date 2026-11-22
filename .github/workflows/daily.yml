@@ -30,7 +30,7 @@ jobs:
       YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
       YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
       FINAL_WHISPER_MODEL: ${{ vars.FINAL_WHISPER_MODEL || 'large-v3-turbo' }}
-      FINAL_WHISPER_LANG: ${{ vars.FINAL_WHISPER_LANG || 'de' }}
+      FINAL_WHISPER_LANG: ${{ vars.FINAL_WHISPER_LANG || '' }}
     steps:
       - uses: actions/checkout@v4
 
