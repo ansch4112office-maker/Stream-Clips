@@ -1,4 +1,7 @@
 name: Auto-Clips
+run-name: Auto-Clips ${{ github.event.inputs.streamer }}
+
+
 
 # Ein Klick: VOD rein, Kandidaten raus.
 # Ablauf: Transkript (Whisper tiny, nur zur Orientierung) + laute Stellen -> Chat-Replay und
