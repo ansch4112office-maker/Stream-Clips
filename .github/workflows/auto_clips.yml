@@ -86,7 +86,7 @@ jobs:
           # aus einem eigenen Durchlauf mit dem besten Modell. Wenn zu oft "Anfang nicht im Transkript
           # gefunden" im Log steht, hier auf base hochstellen.
           WHISPER_MODEL: ${{ vars.WHISPER_MODEL || 'tiny' }}
-          WHISPER_LANG: ${{ vars.WHISPER_LANG || 'de' }}
+          WHISPER_LANG: ${{ vars.WHISPER_LANG || '' }}
         run: |
           mkdir -p data
 
