@@ -21,7 +21,7 @@ import os
 import re
 import sys
 
-latest, review, out = sys.argv[1:4]
+words_json, out = sys.argv[1:3]
 
 SUB_Y = int(os.environ.get("SUB_Y", "1250"))
 SIZE = int(os.environ.get("SUB_SIZE", "88"))
@@ -36,13 +36,11 @@ if not re.fullmatch(r"[0-9A-Fa-f]{6}", HL):
 # ASS nutzt BGR statt RGB
 HL_ASS = f"&H{HL[4:6]}{HL[2:4]}{HL[0:2]}&"
 
-with open(latest, encoding="utf-8") as f:
+with open(words_json, encoding="utf-8") as f:
     d = json.load(f)
-with open(review, encoding="utf-8") as f:
-    r = json.load(f)
 
-t0, t1 = r["start_abs"], r["end_abs"]
-words = [w for w in d.get("words", []) if w["end"] > t0 and w["start"] < t1 and w["word"].strip()]
+t0, t1 = 0.0, float(d.get("duration", 1e9))
+words = [w for w in d.get("words", []) if w["word"].strip()]
 if not words:
     print("Keine Wortzeiten im Clip, keine Untertitel.")
     sys.exit(0)
