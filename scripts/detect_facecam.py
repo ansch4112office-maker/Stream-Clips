@@ -25,6 +25,8 @@ import tempfile
 
 try:
     import cv2
+    if not hasattr(cv2, "CascadeClassifier"):
+        raise ImportError("cv2 ohne CascadeClassifier")
 except ImportError:  # dann läuft nur der Gemini-Rückfall
     cv2 = None
 
