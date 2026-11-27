@@ -15,7 +15,7 @@ ass = sys.argv[4] if len(sys.argv) > 4 and os.path.exists(sys.argv[4]) else None
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 W, H = 1080, 1920
-TOP_MIN, TOP_MAX = 600, 900  # Hoehe des Facecam-Bereichs
+TOP_MIN, TOP_MAX = 600, 760  # Hoehe des Facecam-Bereichs
 MIN_ZOOM, MAX_ZOOM = 1.1, 2.2  # Gameplay mindestens leicht gezoomt
 MARGIN = 0.02  # Sicherheitsabstand zur Facecam (Anteil der Bildbreite/-hoehe)
 
@@ -102,14 +102,15 @@ crop = game_crop(sw, sh, (fx0, fy0, fx1, fy1), W / bottom_h)
 if crop is None:
     fallback("kein Gameplay-Ausschnitt ohne Facecam gefunden")
 cx, cy, cw, ch = crop
-print(f"Facecam {fw}x{fh} bei {fx0},{fy0}; Gameplay {cw}x{ch} bei {cx},{cy}; oben {top_h}px, unten {bottom_h}px")
+print(f"Quelle {sw}x{sh}; Facecam {fw}x{fh} bei {fx0},{fy0} (Vergroesserung {max(W / fw, top_h / fh):.1f}x); "
+      f"Gameplay {cw}x{ch} bei {cx},{cy}; oben {top_h}px, unten {bottom_h}px")
 
 sub_filter = f",ass={ass}" if ass else ""
 filter_complex = (
     "[0:v]split=2[a][b];"
     f"[a]crop={fw}:{fh}:{fx0}:{fy0},"
     f"scale={W}:{top_h}:force_original_aspect_ratio=increase:flags=lanczos,"
-    f"crop={W}:{top_h},setsar=1[top];"
+    f"crop={W}:{top_h},unsharp=5:5:0.5:5:5:0.0,setsar=1[top];"  # leicht nachschaerfen
     f"[b]crop={cw}:{ch}:{cx}:{cy},scale={W}:{bottom_h}:flags=lanczos,setsar=1[bot];"
     f"[top][bot]vstack=inputs=2{sub_filter},format=yuv420p[v]"
 )
@@ -119,7 +120,7 @@ subprocess.run(
         "ffmpeg", "-y", "-v", "error", "-i", src,
         "-filter_complex", filter_complex,
         "-map", "[v]", "-map", "0:a?",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
         "-c:a", "aac", "-b:a", "160k",
         "-movflags", "+faststart",
         dst,
