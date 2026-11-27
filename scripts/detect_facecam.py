@@ -1,3 +1,4 @@
+
 """Findet die Facecam: zuerst kostenlos mit OpenCV (Gesichtserkennung ueber viele Bilder),
 nur wenn das nichts Stabiles ergibt, mit Gemini als Rueckfall.
 
@@ -14,7 +15,7 @@ Schreibt facecam.json:
 
 Dieses Skript bricht nie ab: Bei jedem Problem steht found=false in der Datei.
 
-Installieren: pip install opencv-python-headless numpy
+Installieren: pip install "opencv-python-headless<5" numpy
 """
 import json
 import os
@@ -26,9 +27,11 @@ import tempfile
 try:
     import cv2
     if not hasattr(cv2, "CascadeClassifier"):
-        raise ImportError("cv2 ohne CascadeClassifier")
-except ImportError:  # dann läuft nur der Gemini-Rückfall
+        raise ImportError(f"OpenCV {cv2.__version__} hat keinen CascadeClassifier (Version <5 noetig)")
+    CV2_ERROR = None
+except ImportError as e:  # dann läuft nur der Gemini-Rückfall
     cv2 = None
+    CV2_ERROR = str(e)
 
 out_path, debug_path = sys.argv[1], sys.argv[2]
 videos = sys.argv[3:]
@@ -121,7 +124,7 @@ def expand(face):
 
 def detect_opencv(frames):
     if cv2 is None:
-        return None, "OpenCV nicht installiert"
+        return None, f"OpenCV nicht nutzbar: {CV2_ERROR}"
     cascades = []
     for name in ("haarcascade_frontalface_default.xml", "haarcascade_frontalface_alt2.xml"):
         c = cv2.CascadeClassifier(os.path.join(cv2.data.haarcascades, name))
@@ -216,7 +219,11 @@ def detect_gemini(frames):
             print("Gemini-Durchlauf fehlgeschlagen:", e)
             continue
         box = parse_gemini_box(answer)
+        print("Gemini-Antwort:", str(answer)[:300])
         print("Gemini-Durchlauf:", box)
+        if box is None and isinstance(answer, dict) and answer.get("found"):
+            print("Gemini hat eine Facecam gemeldet, aber das Rechteck wurde verworfen "
+                  "(unvollstaendig oder unplausible Groesse/Form)")
         if box:
             boxes.append(box)
     if len(boxes) < 2:
