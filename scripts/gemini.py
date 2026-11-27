@@ -84,9 +84,14 @@ def ask(parts, schema, temperature=0.3, attempts=4):
                     time.sleep(10 * (attempt + 1))
                     continue
                 break  # z. B. 404 (Modell gibt es nicht): naechstes Modell
-            except (KeyError, IndexError, json.JSONDecodeError) as e:
+            except (KeyError, IndexError) as e:
                 last_error = f"{model}: unerwartete Antwort ({e!r})"
                 break
+            except ValueError as e:
+                # kaputtes JSON oder eine riesige Zahl (mehr als 4300 Stellen): nochmal versuchen
+                last_error = f"{model}: unlesbare Antwort ({str(e)[:200]})"
+                print("Antwort unlesbar, neuer Versuch:", last_error)
+                continue
             except (urllib.error.URLError, TimeoutError) as e:
                 last_error = f"{model}: Netzwerkfehler ({e!r})"
                 time.sleep(5)
