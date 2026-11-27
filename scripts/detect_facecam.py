@@ -1,16 +1,16 @@
 
-"""Findet die Facecam: zuerst kostenlos mit OpenCV (Gesichtserkennung ueber viele Bilder),
-nur wenn das nichts Stabiles ergibt, mit Gemini als Rueckfall.
+"""Findet die Facecam, und zwar das GANZE Kamerafenster, nicht nur das Gesicht.
 
 Aufruf: python scripts/detect_facecam.py facecam.json debug.jpg snip1.mp4 [snip2.mp4 ...]
 
-Idee: Die Facecam ist statisch, Gesichter im Spiel wandern. Aus jedem Video werden mehrere Bilder
-entnommen, in jedem werden Gesichter gesucht. Eine Gesichtsbox, die in den meisten Bildern an
-fast derselben Stelle liegt, ist die Facecam. Die Box wird dann auf den ganzen Rahmen vergroessert
-(Schultern, Rand) und, wenn sie nah an einer Bildkante liegt, bis zur Kante gezogen.
+Ablauf:
+  1. OpenCV sucht das Gesicht, das in den meisten Bildern an derselben Stelle liegt.
+  2. Gemini sucht den Rahmen des ganzen Kamerafensters. Er zaehlt nur, wenn er zum Gesicht passt.
+     Die Kanten werden danach auf feste Linien im Bild eingerastet.
+  3. Nur wenn Gemini nichts Brauchbares liefert: grosszuegiger 16:9-Ausschnitt um das Gesicht.
 
 Schreibt facecam.json:
-  {"found": true, "box": [x0, y0, x1, y1], "method": "opencv"|"gemini", ...}  (Anteile 0 bis 1)
+  {"found": true, "box": [x0, y0, x1, y1], "method": "gemini"|"opencv", ...}  (Anteile 0 bis 1)
   {"found": false, "reason": "..."}
 
 Dieses Skript bricht nie ab: Bei jedem Problem steht found=false in der Datei.
@@ -29,18 +29,19 @@ try:
     if not hasattr(cv2, "CascadeClassifier"):
         raise ImportError(f"OpenCV {cv2.__version__} hat keinen CascadeClassifier (Version <5 noetig)")
     CV2_ERROR = None
-except ImportError as e:  # dann läuft nur der Gemini-Rückfall
+except ImportError as e:  # dann läuft nur Gemini
     cv2 = None
     CV2_ERROR = str(e)
-
-out_path, debug_path = sys.argv[1], sys.argv[2]
-videos = sys.argv[3:]
 
 FRAC = (0.1, 0.3, 0.5, 0.7, 0.9)  # Positionen im Video, aus denen Bilder entnommen werden
 MIN_AGREE_IOU = 0.5
 MIN_SHARE = 0.5  # so viel Anteil der Bilder muss das Gesicht an derselben Stelle zeigen
 MIN_HITS = 3
-EDGE_SNAP = 0.08  # liegt die vergroesserte Box so nah an einer Kante, wird sie bis dahin gezogen
+EDGE_SNAP = 0.03  # liegt Geminis Rahmen so nah an einer Bildkante, wird er bis dahin gezogen
+LINE_SEARCH = 0.02  # so weit darf eine Kante beim Einrasten wandern
+LINE_SHARE = 0.6  # so viel der Kantenlaenge muss eine feste Linie sein
+FACE_ZOOM_OUT = 4.2  # Rueckfall: Breite des Ausschnitts in Gesichtsbreiten (groesser = weiter weg)
+HEADROOM = 0.25  # Rueckfall: Platz ueber dem Gesicht (Anteil der Ausschnitthoehe)
 
 
 def duration(path):
@@ -51,7 +52,7 @@ def duration(path):
     return float(json.loads(out)["format"]["duration"])
 
 
-def extract_frames():
+def extract_frames(videos):
     tmp = tempfile.mkdtemp()
     frames = []
     for vi, video in enumerate(videos):
@@ -65,10 +66,11 @@ def extract_frames():
             try:
                 subprocess.run(
                     ["ffmpeg", "-y", "-v", "error", "-ss", f"{dur * frac:.2f}", "-i", video,
-                     "-frames:v", "1", "-vf", "scale=960:-2", "-q:v", "3", p],
+                     "-frames:v", "1", "-vf", "scale=1280:-2", "-q:v", "2", p],
                     check=True,
                 )
-                frames.append(p)
+                if os.path.exists(p):
+                    frames.append(p)
             except Exception as e:
                 print("Bild uebersprungen:", e)
     return frames
@@ -91,7 +93,7 @@ def plausible(box):
     return 0.06 <= w <= 0.6 and 0.06 <= h <= 0.7 and 0.5 <= (w / h) * (16 / 9) <= 3
 
 
-# ---------- Weg 1: OpenCV ----------
+# ---------- Gesicht mit OpenCV ----------
 def find_faces(img, cascades):
     gray = cv2.equalizeHist(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
     h, w = gray.shape
@@ -104,25 +106,7 @@ def find_faces(img, cascades):
     return found
 
 
-def expand(face):
-    """Gesichtsbox -> Facecam-Rahmen (breiter, mit Schultern), an nahe Kanten gezogen."""
-    fw, fh = face[2] - face[0], face[3] - face[1]
-    cx = (face[0] + face[2]) / 2
-    x0, x1 = cx - fw * 1.3, cx + fw * 1.3
-    y0, y1 = face[1] - fh * 0.6, face[3] + fh * 0.9
-    x0, y0, x1, y1 = max(0.0, x0), max(0.0, y0), min(1.0, x1), min(1.0, y1)
-    if x0 < EDGE_SNAP:
-        x0 = 0.0
-    if y0 < EDGE_SNAP:
-        y0 = 0.0
-    if x1 > 1 - EDGE_SNAP:
-        x1 = 1.0
-    if y1 > 1 - EDGE_SNAP:
-        y1 = 1.0
-    return [x0, y0, x1, y1]
-
-
-def detect_opencv(frames):
+def detect_face(frames):
     if cv2 is None:
         return None, f"OpenCV nicht nutzbar: {CV2_ERROR}"
     cascades = []
@@ -156,21 +140,35 @@ def detect_opencv(frames):
                 best = members
     if not best or len(best) < max(MIN_HITS, MIN_SHARE * n):
         return None, f"kein stabiles Gesicht ({len(best or [])} von {n} Bildern)"
-
-    face = median_box(best)
-    box = expand(face)
-    if not plausible(box):
-        return None, f"Box unplausibel: {box}"
-    return {"box": box, "hits": len(best), "frames": n}, None
+    return {"face": median_box(best), "hits": len(best), "frames": n}, None
 
 
-# ---------- Weg 2: Gemini (nur Rueckfall) ----------
+def around_face(face):
+    """Rueckfall: 16:9-Ausschnitt mit viel Luft. Bei 16:9-Quellen sind Breite und Hoehe als
+    Anteil dann gleich gross. An Bildkanten wird verschoben statt abgeschnitten."""
+    size = min(0.5, (face[2] - face[0]) * FACE_ZOOM_OUT)
+    cx = (face[0] + face[2]) / 2
+    x0 = min(max(0.0, cx - size / 2), 1.0 - size)
+    y0 = min(max(0.0, face[1] - size * HEADROOM), 1.0 - size)
+    return [x0, y0, x0 + size, y0 + size]
+
+
+def fits_face(box, face):
+    """Passt Geminis Rahmen zum Gesicht? Das Gesicht muss drin liegen und darf ihn nicht fuellen."""
+    cx, cy = (face[0] + face[2]) / 2, (face[1] + face[3]) / 2
+    inside = box[0] <= cx <= box[2] and box[1] <= cy <= box[3]
+    return inside and (box[2] - box[0]) >= 1.8 * (face[2] - face[0])
+
+
+# ---------- Kamerafenster mit Gemini ----------
 PROMPT = """Das sind {n} Bilder aus demselben Twitch-Stream.
 Finde die Facecam: das Live-Kamerabild des Streamers (eine Person vor der Kamera), das ins
 Spielbild eingeblendet ist. Sie sitzt meistens in einer Ecke, oft mit Rahmen.
 
-Gib EIN Rechteck zurueck, das die Facecam auf allen Bildern komplett umfasst, aber moeglichst
-nichts vom Spiel. Koordinaten normiert auf 0 bis 1000 (0,0 = oben links, 1000,1000 = unten rechts).
+Gib das KOMPLETTE rechteckige Kamerafenster zurueck, von Aussenkante zu Aussenkante, also mit
+Hintergrund, Schultern und allem, was die Kamera zeigt. NICHT nur Kopf oder Gesicht. Nimm aber
+nichts vom Spiel oder von anderen Einblendungen mit. Koordinaten normiert auf 0 bis 1000
+(0,0 = oben links, 1000,1000 = unten rechts).
 
 Setze found auf false, wenn keine eingeblendete Facecam zu sehen ist (zum Beispiel nur Spiel,
 oder die Kamera fuellt das ganze Bild). Eine Person, die im Spiel selbst vorkommt (Spielfigur,
@@ -201,13 +199,15 @@ def parse_gemini_box(answer):
     return box if plausible(box) else None
 
 
-def detect_gemini(frames):
+def detect_gemini(frames, face):
     if not os.environ.get("GEMINI_API_KEY"):
         return None, "kein GEMINI_API_KEY"
     from gemini import ask, image_part
 
-    subsets = [frames]
-    for sub in (frames[0::2], frames[1::2]):
+    # drei verschiedene Bildgruppen mit hoechstens 6 Bildern, verteilt ueber alle Ausschnitte
+    subsets = []
+    for offset in range(3):
+        sub = frames[offset::3][:6]
         if sub and sub not in subsets:
             subsets.append(sub)
     boxes = []
@@ -215,30 +215,73 @@ def detect_gemini(frames):
         try:
             answer = ask([{"text": PROMPT.format(n=len(sub))}] + [image_part(p) for p in sub],
                          SCHEMA, temperature=0.1, attempts=2)
-        except SystemExit as e:
-            print("Gemini-Durchlauf fehlgeschlagen:", e)
+        except (Exception, SystemExit) as e:
+            print("Gemini-Durchlauf fehlgeschlagen:", str(e)[:200].replace(os.environ["GEMINI_API_KEY"], "***"))
             continue
         box = parse_gemini_box(answer)
         print("Gemini-Antwort:", str(answer)[:300])
-        print("Gemini-Durchlauf:", box)
-        if box is None and isinstance(answer, dict) and answer.get("found"):
-            print("Gemini hat eine Facecam gemeldet, aber das Rechteck wurde verworfen "
-                  "(unvollstaendig oder unplausible Groesse/Form)")
+        if box and face and not fits_face(box, face):
+            print("Verworfen, passt nicht zum Gesicht (zu eng oder falsche Stelle):", box)
+            box = None
         if box:
             boxes.append(box)
     if len(boxes) < 2:
-        return None, f"Gemini: nur {len(boxes)} von {len(subsets)} Durchlaeufen mit Facecam"
+        return None, f"Gemini: nur {len(boxes)} von {len(subsets)} Durchlaeufen brauchbar"
     med = median_box(boxes)
     agree = [b for b in boxes if iou(b, med) >= MIN_AGREE_IOU]
     if len(agree) < 2:
         return None, f"Gemini: Durchlaeufe widersprechen sich: {boxes}"
-    x0, y0, x1, y1 = median_box(agree)
-    pad = 0.015
-    return {"box": [max(0.0, x0 - pad), max(0.0, y0 - pad), min(1.0, x1 + pad), min(1.0, y1 + pad)],
-            "hits": len(agree), "frames": len(subsets)}, None
+    return {"box": median_box(agree), "hits": len(agree), "frames": len(subsets)}, None
 
 
-def draw_debug(frame, box):
+def snap_to_lines(frames, box):
+    """Zieht jede Seite auf eine Linie, die in fast allen Bildern an derselben Stelle liegt
+    (= Rand des Kamerafensters). Ohne klare Linie bleibt die Seite, wie sie ist."""
+    if cv2 is None:
+        return box
+    import numpy as np
+
+    sums, count, shape = [None, None], 0, None
+    for p in frames:
+        img = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
+        if img is None or (shape and img.shape != shape):
+            continue
+        shape = img.shape
+        for axis, (dx, dy) in enumerate(((1, 0), (0, 1))):
+            mask = (np.abs(cv2.Sobel(img, cv2.CV_32F, dx, dy)) > 60).astype(np.float32)
+            sums[axis] = mask if sums[axis] is None else sums[axis] + mask
+        count += 1
+    if count < MIN_HITS:
+        return box
+    h, w = shape
+    stable_x, stable_y = (s / count >= 0.7 for s in sums)
+
+    result = list(box)
+    for i in range(4):
+        vertical = i % 2 == 0  # linke und rechte Seite
+        size = w if vertical else h
+        if box[i] < EDGE_SNAP:
+            result[i] = 0.0
+            continue
+        if box[i] > 1 - EDGE_SNAP:
+            result[i] = 1.0
+            continue
+        center, reach = int(box[i] * size), int(LINE_SEARCH * size)
+        if vertical:
+            span = stable_x[int(box[1] * h):int(box[3] * h), :]
+            scores = span.mean(axis=0)
+        else:
+            span = stable_y[:, int(box[0] * w):int(box[2] * w)]
+            scores = span.mean(axis=1)
+        lo, hi = max(0, center - reach), min(size, center + reach + 1)
+        best = lo + int(np.argmax(scores[lo:hi]))
+        if scores[best] >= LINE_SHARE:
+            # 2 Pixel nach innen, damit der Rand selbst nicht im Bild ist
+            result[i] = (best + (2 if i < 2 else -1)) / size
+    return result
+
+
+def draw_debug(frame, box, debug_path):
     try:
         img = cv2.imread(frame)
         h, w = img.shape[:2]
@@ -249,34 +292,45 @@ def draw_debug(frame, box):
         print("Kontrollbild nicht erstellt:", e)
 
 
-def detect():
-    frames = extract_frames()
+def detect(videos, debug_path):
+    frames = extract_frames(videos)
     if not frames:
         return {"found": False, "reason": "keine Bilder aus den Ausschnitten"}
 
-    res, why = detect_opencv(frames)
-    method = "opencv"
-    if res is None:
-        print("OpenCV hat nichts Stabiles gefunden:", why, "-> Gemini")
-        res, why2 = detect_gemini(frames)
-        method = "gemini"
-        if res is None:
-            return {"found": False, "reason": f"OpenCV: {why} | {why2}"}
+    face_res, why_face = detect_face(frames)
+    face = face_res["face"] if face_res else None
+    print("Gesicht:", face if face else why_face)
 
-    draw_debug(frames[0], res["box"])
+    res, why = detect_gemini(frames, face)
+    if res:
+        method = "gemini"
+        res["box"] = snap_to_lines(frames, res["box"])
+    elif face:
+        print("Kein brauchbarer Rahmen von Gemini:", why, "-> weiter Ausschnitt um das Gesicht")
+        method = "opencv"
+        res = {"box": around_face(face), "hits": face_res["hits"], "frames": face_res["frames"]}
+    else:
+        return {"found": False, "reason": f"OpenCV: {why_face} | {why}"}
+
+    draw_debug(frames[0], res["box"], debug_path)
     return {"found": True, "box": res["box"], "method": method,
             "hits": res["hits"], "frames": res["frames"]}
 
 
-try:
-    result = detect()
-except (Exception, SystemExit) as e:
-    reason = f"Erkennung fehlgeschlagen: {e}"
-    key = os.environ.get("GEMINI_API_KEY")
-    if key:
-        reason = reason.replace(key, "***")
-    result = {"found": False, "reason": reason[:300]}
+def main():
+    out_path, debug_path = sys.argv[1], sys.argv[2]
+    try:
+        result = detect(sys.argv[3:], debug_path)
+    except (Exception, SystemExit) as e:
+        reason = f"Erkennung fehlgeschlagen: {e}"
+        key = os.environ.get("GEMINI_API_KEY")
+        if key:
+            reason = reason.replace(key, "***")
+        result = {"found": False, "reason": reason[:300]}
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False)
+    print("Facecam:", result)
 
-with open(out_path, "w", encoding="utf-8") as f:
-    json.dump(result, f, ensure_ascii=False)
-print("Facecam:", result)
+
+if __name__ == "__main__":
+    main()
