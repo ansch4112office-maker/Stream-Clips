@@ -207,6 +207,7 @@ jobs:
         if: steps.have.outputs.cached == 'false'
         run: |
           sudo apt-get update && sudo apt-get install -y ffmpeg
+          # OpenCV 5 hat keinen CascadeClassifier mehr, deshalb Version 4
           pip install yt-dlp numpy "opencv-python-headless<5"
 
       - uses: actions/download-artifact@v4
